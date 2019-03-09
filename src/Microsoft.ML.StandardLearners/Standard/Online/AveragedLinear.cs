@@ -2,295 +2,314 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Float = System.Single;
-
 using System;
-using Microsoft.ML.Runtime.CommandLine;
-using Microsoft.ML.Runtime.Data;
-using Microsoft.ML.Runtime.EntryPoints;
-using Microsoft.ML.Runtime.Internal.Utilities;
-using Microsoft.ML.Runtime.Numeric;
-using Microsoft.ML.Runtime.Internal.Internallearn;
+using Microsoft.ML.CommandLine;
+using Microsoft.ML.Data;
+using Microsoft.ML.EntryPoints;
+using Microsoft.ML.Internal.Internallearn;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Numeric;
+using Microsoft.ML.Runtime;
 
 // TODO: Check if it works properly if Averaged is set to false
 
-namespace Microsoft.ML.Runtime.Learners
+namespace Microsoft.ML.Trainers
 {
-    public abstract class AveragedLinearArguments : OnlineLinearArguments
+    /// <summary>
+    /// Arguments class for averaged linear trainers.
+    /// </summary>
+    public abstract class AveragedLinearOptions : OnlineLinearOptions
     {
+        /// <summary>
+        /// <a href="tmpurl_lr">Learning rate</a>.
+        /// </summary>
         [Argument(ArgumentType.AtMostOnce, HelpText = "Learning rate", ShortName = "lr", SortOrder = 50)]
         [TGUI(Label = "Learning rate", SuggestedSweeps = "0.01,0.1,0.5,1.0")]
         [TlcModule.SweepableDiscreteParam("LearningRate", new object[] { 0.01, 0.1, 0.5, 1.0 })]
-        public Float LearningRate = 1;
+        public float LearningRate = AveragedDefault.LearningRate;
 
+        /// <summary>
+        /// Determine whether to decrease the <see cref="LearningRate"/> or not.
+        /// </summary>
+        /// <value>
+        /// <see langword="true" /> to decrease the <see cref="LearningRate"/> as iterations progress; otherwise, <see langword="false" />.
+        /// Default is <see langword="false" />. The learning rate will be reduced with every weight update proportional to the square root of the number of updates.
+        /// </value>
         [Argument(ArgumentType.AtMostOnce, HelpText = "Decrease learning rate", ShortName = "decreaselr", SortOrder = 50)]
         [TGUI(Label = "Decrease Learning Rate", Description = "Decrease learning rate as iterations progress")]
         [TlcModule.SweepableDiscreteParam("DecreaseLearningRate", new object[] { false, true })]
-        public bool DecreaseLearningRate = false;
+        public bool DecreaseLearningRate = AveragedDefault.DecreaseLearningRate;
 
+        /// <summary>
+        /// Number of examples after which weights will be reset to the current average.
+        /// </summary>
+        /// <value>
+        /// Default is <see langword="null" />, which disables this feature.
+        /// </value>
         [Argument(ArgumentType.AtMostOnce, HelpText = "Number of examples after which weights will be reset to the current average", ShortName = "numreset")]
         public long? ResetWeightsAfterXExamples = null;
 
+        /// <summary>
+        /// Determines when to update averaged weights.
+        /// </summary>
+        /// <value>
+        /// <see langword="true" /> to update averaged weights only when loss is nonzero.
+        /// <see langword="false" /> to update averaged weights on every example.
+        /// Default is <see langword="true" />.
+        /// </value>
         [Argument(ArgumentType.AtMostOnce, HelpText = "Instead of updating averaged weights on every example, only update when loss is nonzero", ShortName = "lazy")]
         public bool DoLazyUpdates = true;
 
+        /// <summary>
+        /// The L2 weight for <a href='tmpurl_regularization'>regularization</a>.
+        /// </summary>
         [Argument(ArgumentType.AtMostOnce, HelpText = "L2 Regularization Weight", ShortName = "reg", SortOrder = 50)]
         [TGUI(Label = "L2 Regularization Weight")]
-        [TlcModule.SweepableFloatParam("L2RegularizerWeight", 0.0f, 0.5f)]
-        public Float L2RegularizerWeight = 0;
+        [TlcModule.SweepableFloatParam("L2RegularizerWeight", 0.0f, 0.4f)]
+        public float L2RegularizerWeight = AveragedDefault.L2RegularizerWeight;
 
+        /// <summary>
+        /// Extra weight given to more recent updates.
+        /// </summary>
+        /// <value>
+        /// Default is 0, i.e. no extra gain.
+        /// </value>
         [Argument(ArgumentType.AtMostOnce, HelpText = "Extra weight given to more recent updates", ShortName = "rg")]
-        public Float RecencyGain = 0;
+        public float RecencyGain = 0;
 
+        /// <summary>
+        /// Determines whether <see cref="RecencyGain"/> is multiplicative or additive.
+        /// </summary>
+        /// <value>
+        /// <see langword="true" /> means <see cref="RecencyGain"/> is multiplicative.
+        /// <see langword="false" /> means <see cref="RecencyGain"/> is additive.
+        /// Default is <see langword="false" />.
+        /// </value>
         [Argument(ArgumentType.AtMostOnce, HelpText = "Whether Recency Gain is multiplicative (vs. additive)", ShortName = "rgm")]
         public bool RecencyGainMulti = false;
 
+        /// <summary>
+        /// Determines whether to do averaging or not.
+        /// </summary>
+        /// <value>
+        /// <see langword="true" /> to do averaging; otherwise, <see langword="false" />.
+        /// Default is <see langword="true" />.
+        /// </value>
         [Argument(ArgumentType.AtMostOnce, HelpText = "Do averaging?", ShortName = "avg")]
         public bool Averaged = true;
 
+        /// <summary>
+        /// The inexactness tolerance for averaging.
+        /// </summary>
         [Argument(ArgumentType.AtMostOnce, HelpText = "The inexactness tolerance for averaging", ShortName = "avgtol")]
-        public Float AveragedTolerance = (Float)1e-2;
+        internal float AveragedTolerance = (float)1e-2;
+
+        [BestFriend]
+        internal class AveragedDefault : OnlineLinearOptions.OnlineDefault
+        {
+            public const float LearningRate = 1;
+            public const bool DecreaseLearningRate = false;
+            public const float L2RegularizerWeight = 0;
+        }
+
+        internal abstract IComponentFactory<IScalarOutputLoss> LossFunctionFactory { get; }
     }
 
-    public abstract class AveragedLinearTrainer<TArguments, TPredictor> : OnlineLinearTrainer<TArguments, TPredictor>
-        where TArguments : AveragedLinearArguments
-        where TPredictor : IPredictorProducing<Float>
+    public abstract class AveragedLinearTrainer<TTransformer, TModel> : OnlineLinearTrainer<TTransformer, TModel>
+        where TTransformer : ISingleFeaturePredictionTransformer<TModel>
+        where TModel : class
     {
-        protected IScalarOutputLoss LossFunction;
+        private protected readonly AveragedLinearOptions AveragedLinearTrainerOptions;
+        private protected IScalarOutputLoss LossFunction;
 
-        protected Float Gain;
-
-        // For computing averaged weights and bias (if needed)
-        protected VBuffer<Float> TotalWeights;
-        protected Float TotalBias;
-        protected Double NumWeightUpdates;
-
-        // The accumulated gradient of loss against gradient for all updates so far in the
-        // totalled model, versus those pending in the weight vector that have not yet been
-        // added to the total model.
-        protected Double TotalMultipliers;
-        protected Double PendingMultipliers;
-
-        // We'll keep a few things global to prevent garbage collection
-        protected int NumNoUpdates;
-
-        protected AveragedLinearTrainer(TArguments args, IHostEnvironment env, string name)
-            : base(args, env, name)
+        private protected abstract class AveragedTrainStateBase : TrainStateBase
         {
-            Contracts.CheckUserArg(args.LearningRate > 0, nameof(args.LearningRate), UserErrorPositive);
-            Contracts.CheckUserArg(!args.ResetWeightsAfterXExamples.HasValue || args.ResetWeightsAfterXExamples > 0, nameof(args.ResetWeightsAfterXExamples), UserErrorPositive);
-            // Weights are scaled down by 2 * L2 regularization on each update step, so 0.5 would scale all weights to 0, which is not sensible.
-            Contracts.CheckUserArg(0 <= args.L2RegularizerWeight && args.L2RegularizerWeight < 0.5, nameof(args.L2RegularizerWeight), "must be in range [0, 0.5)");
-            Contracts.CheckUserArg(args.RecencyGain >= 0, nameof(args.RecencyGain), UserErrorNonNegative);
-            Contracts.CheckUserArg(args.AveragedTolerance >= 0, nameof(args.AveragedTolerance), UserErrorNonNegative);
-        }
+            protected float Gain;
 
-        protected override void InitCore(IChannel ch, int numFeatures, LinearPredictor predictor)
-        {
-            base.InitCore(ch, numFeatures, predictor);
+            protected int NumNoUpdates;
 
-            // Verify user didn't specify parameters that conflict
-            Contracts.Check(!Args.DoLazyUpdates || !Args.RecencyGainMulti && Args.RecencyGain == 0,
-                "Cannot have both recency gain and lazy updates.");
+            // For computing averaged weights and bias (if needed)
+            protected VBuffer<float> TotalWeights;
+            protected float TotalBias;
+            protected double NumWeightUpdates;
 
-            // Do the other initializations by setting the setters as if user had set them
-            // Initialize the averaged weights if needed (i.e., do what happens when Averaged is set)
-            if (Args.Averaged)
+            // The accumulated gradient of loss against gradient for all updates so far in the
+            // totalled model, versus those pending in the weight vector that have not yet been
+            // added to the total model.
+            protected double TotalMultipliers;
+            protected double PendingMultipliers;
+
+            protected readonly bool Averaged;
+            private readonly long _resetWeightsAfterXExamples;
+            private readonly AveragedLinearOptions _args;
+            private readonly IScalarOutputLoss _loss;
+
+            private protected AveragedTrainStateBase(IChannel ch, int numFeatures, LinearModelParameters predictor, AveragedLinearTrainer<TTransformer, TModel> parent)
+                : base(ch, numFeatures, predictor, parent)
             {
-                if (Args.AveragedTolerance > 0)
+                // Do the other initializations by setting the setters as if user had set them
+                // Initialize the averaged weights if needed (i.e., do what happens when Averaged is set)
+                Averaged = parent.AveragedLinearTrainerOptions.Averaged;
+                if (Averaged)
+                {
+                    if (parent.AveragedLinearTrainerOptions.AveragedTolerance > 0)
+                        VBufferUtils.Densify(ref Weights);
+                    Weights.CopyTo(ref TotalWeights);
+                }
+                else
+                {
+                    // It is definitely advantageous to keep weights dense if we aren't adding them
+                    // to another vector with each update.
                     VBufferUtils.Densify(ref Weights);
-                Weights.CopyTo(ref TotalWeights);
-            }
-            else
-            {
-                // It is definitely advantageous to keep weights dense if we aren't adding them
-                // to another vector with each update.
-                VBufferUtils.Densify(ref Weights);
-            }
-            Gain = 1;
-        }
-
-        /// <summary>
-        /// Return the raw margin from the decision hyperplane
-        /// </summary>
-        protected Float AveragedMargin(ref VBuffer<Float> feat)
-        {
-            Contracts.Assert(Args.Averaged);
-            return (TotalBias + VectorUtils.DotProduct(ref feat, ref TotalWeights)) / (Float)NumWeightUpdates;
-        }
-
-        protected override Float Margin(ref VBuffer<Float> feat)
-        {
-            return Args.Averaged ? AveragedMargin(ref feat) : CurrentMargin(ref feat);
-        }
-
-        protected override void FinishIteration(IChannel ch)
-        {
-            // REVIEW: Very odd - the old AP and OGD did different things here and neither seemed correct.
-
-            // Finalize things
-            if (Args.Averaged)
-            {
-                if (Args.DoLazyUpdates && NumNoUpdates > 0)
-                {
-                    // Update the total weights to include the final loss=0 updates
-                    VectorUtils.AddMult(ref Weights, NumNoUpdates * WeightsScale, ref TotalWeights);
-                    TotalBias += Bias * NumNoUpdates;
-                    NumWeightUpdates += NumNoUpdates;
-                    NumNoUpdates = 0;
-                    TotalMultipliers += PendingMultipliers;
-                    PendingMultipliers = 0;
                 }
+                _resetWeightsAfterXExamples = parent.AveragedLinearTrainerOptions.ResetWeightsAfterXExamples ?? 0;
+                _args = parent.AveragedLinearTrainerOptions;
+                _loss = parent.LossFunction;
 
-                // reset the weights to averages if needed
-                if (Args.ResetWeightsAfterXExamples == 0)
-                {
-                    // #if OLD_TRACING // REVIEW: How should this be ported?
-                    Console.WriteLine("");
-                    // #endif
-                    ch.Info("Resetting weights to average weights");
-                    VectorUtils.ScaleInto(ref TotalWeights, 1 / (Float)NumWeightUpdates, ref Weights);
-                    WeightsScale = 1;
-                    Bias = TotalBias / (Float)NumWeightUpdates;
-                }
+                Gain = 1;
             }
 
-            base.FinishIteration(ch);
-        }
-
-#if OLD_TRACING // REVIEW: How should this be ported?
-        protected override void PrintWeightsHistogram()
-        {
-            if (_args.averaged)
-                PrintWeightsHistogram(ref _totalWeights, _totalBias, (Float)_numWeightUpdates);
-            else
-                base.PrintWeightsHistogram();
-        }
-#endif
-
-        protected override void ProcessDataInstance(IChannel ch, ref VBuffer<Float> feat, Float label, Float weight)
-        {
-            base.ProcessDataInstance(ch, ref feat, label, weight);
-
-            // compute the update and update if needed
-            Float output = CurrentMargin(ref feat);
-            Double loss = LossFunction.Loss(output, label);
-
-            // REVIEW: Should this be biasUpdate != 0?
-            // This loss does not incorporate L2 if present, but the chance of that addition to the loss
-            // exactly cancelling out loss is remote.
-            if (loss != 0 || Args.L2RegularizerWeight > 0)
+            /// <summary>
+            /// Return the raw margin from the decision hyperplane
+            /// </summary>
+            public float AveragedMargin(in VBuffer<float> feat)
             {
-                // If doing lazy weights, we need to update the totalWeights and totalBias before updating weights/bias
-                if (Args.DoLazyUpdates && Args.Averaged && NumNoUpdates > 0 && TotalMultipliers * Args.AveragedTolerance <= PendingMultipliers)
+                Contracts.Assert(Averaged);
+                return (TotalBias + VectorUtils.DotProduct(in feat, in TotalWeights)) / (float)NumWeightUpdates;
+            }
+
+            public override float Margin(in VBuffer<float> feat)
+                => Averaged ? AveragedMargin(in feat) : CurrentMargin(in feat);
+
+            public override void FinishIteration(IChannel ch)
+            {
+                // Finalize things
+                if (Averaged)
                 {
-                    VectorUtils.AddMult(ref Weights, NumNoUpdates * WeightsScale, ref TotalWeights);
-                    TotalBias += Bias * NumNoUpdates * WeightsScale;
-                    NumWeightUpdates += NumNoUpdates;
-                    NumNoUpdates = 0;
-                    TotalMultipliers += PendingMultipliers;
-                    PendingMultipliers = 0;
-                }
-
-#if OLD_TRACING // REVIEW: How should this be ported?
-                // If doing debugging and have L2 regularization, adjust the loss to account for that component.
-                if (DebugLevel > 2 && _args.l2RegularizerWeight != 0)
-                    loss += _args.l2RegularizerWeight * VectorUtils.NormSquared(_weights) * _weightsScale * _weightsScale;
-#endif
-
-                // Make final adjustments to update parameters.
-                Float rate = Args.LearningRate;
-                if (Args.DecreaseLearningRate)
-                    rate /= MathUtils.Sqrt((Float)NumWeightUpdates + NumNoUpdates + 1);
-                Float biasUpdate = -rate * LossFunction.Derivative(output, label);
-
-                // Perform the update to weights and bias.
-                VectorUtils.AddMult(ref feat, biasUpdate / WeightsScale, ref Weights);
-                WeightsScale *= 1 - 2 * Args.L2RegularizerWeight; // L2 regularization.
-                ScaleWeightsIfNeeded();
-                Bias += biasUpdate;
-                PendingMultipliers += Math.Abs(biasUpdate);
-
-#if OLD_TRACING // REVIEW: How should this be ported?
-                if (DebugLevel > 2)
-                { // sanity check:   did loss for the example decrease?
-                    Double newLoss = _lossFunction.Loss(CurrentMargin(instance), instance.Label);
-                    if (_args.l2RegularizerWeight != 0)
-                        newLoss += _args.l2RegularizerWeight * VectorUtils.NormSquared(_weights) * _weightsScale * _weightsScale;
-
-                    if (newLoss - loss > 0 && (newLoss - loss > 0.01 || _args.l2RegularizerWeight == 0))
+                    if (_args.DoLazyUpdates && NumNoUpdates > 0)
                     {
-                        Host.StdErr.WriteLine("Loss increased (unexpected):  Old value: {0}, new value: {1}", loss, newLoss);
-                        Host.StdErr.WriteLine("Offending instance #{0}: {1}", _numIterExamples, instance);
+                        // Update the total weights to include the final loss=0 updates
+                        VectorUtils.AddMult(in Weights, NumNoUpdates * WeightsScale, ref TotalWeights);
+                        TotalBias += Bias * NumNoUpdates;
+                        NumWeightUpdates += NumNoUpdates;
+                        NumNoUpdates = 0;
+                        TotalMultipliers += PendingMultipliers;
+                        PendingMultipliers = 0;
+                    }
+
+                    // reset the weights to averages if needed
+                    if (_args.ResetWeightsAfterXExamples == 0)
+                    {
+                        ch.Info("Resetting weights to average weights");
+                        VectorUtils.ScaleInto(in TotalWeights, 1 / (float)NumWeightUpdates, ref Weights);
+                        WeightsScale = 1;
+                        Bias = TotalBias / (float)NumWeightUpdates;
                     }
                 }
-#endif
+
+                base.FinishIteration(ch);
             }
 
-            // Add to averaged weights and increment the count.
-            if (Args.Averaged)
+            public override void ProcessDataInstance(IChannel ch, in VBuffer<float> feat, float label, float weight)
             {
-                if (!Args.DoLazyUpdates)
-                    IncrementAverageNonLazy();
-                else
-                    NumNoUpdates++;
+                base.ProcessDataInstance(ch, in feat, label, weight);
 
-                // Reset the weights to averages if needed.
-                if (Args.ResetWeightsAfterXExamples > 0 &&
-                    NumIterExamples % Args.ResetWeightsAfterXExamples.Value == 0)
+                // compute the update and update if needed
+                float output = CurrentMargin(in feat);
+                Double loss = _loss.Loss(output, label);
+
+                // REVIEW: Should this be biasUpdate != 0?
+                // This loss does not incorporate L2 if present, but the chance of that addition to the loss
+                // exactly cancelling out loss is remote.
+                if (loss != 0 || _args.L2RegularizerWeight > 0)
                 {
-                    // #if OLD_TRACING // REVIEW: How should this be ported?
-                    Console.WriteLine();
-                    // #endif
-                    ch.Info("Resetting weights to average weights");
-                    VectorUtils.ScaleInto(ref TotalWeights, 1 / (Float)NumWeightUpdates, ref Weights);
-                    WeightsScale = 1;
-                    Bias = TotalBias / (Float)NumWeightUpdates;
+                    // If doing lazy weights, we need to update the totalWeights and totalBias before updating weights/bias
+                    if (_args.DoLazyUpdates && _args.Averaged && NumNoUpdates > 0 && TotalMultipliers * _args.AveragedTolerance <= PendingMultipliers)
+                    {
+                        VectorUtils.AddMult(in Weights, NumNoUpdates * WeightsScale, ref TotalWeights);
+                        TotalBias += Bias * NumNoUpdates * WeightsScale;
+                        NumWeightUpdates += NumNoUpdates;
+                        NumNoUpdates = 0;
+                        TotalMultipliers += PendingMultipliers;
+                        PendingMultipliers = 0;
+                    }
+
+                    // Make final adjustments to update parameters.
+                    float rate = _args.LearningRate;
+                    if (_args.DecreaseLearningRate)
+                        rate /= MathUtils.Sqrt((float)NumWeightUpdates + NumNoUpdates + 1);
+                    float biasUpdate = -rate * _loss.Derivative(output, label);
+
+                    // Perform the update to weights and bias.
+                    VectorUtils.AddMult(in feat, biasUpdate / WeightsScale, ref Weights);
+                    WeightsScale *= 1 - 2 * _args.L2RegularizerWeight; // L2 regularization.
+                    ScaleWeightsIfNeeded();
+                    Bias += biasUpdate;
+                    PendingMultipliers += Math.Abs(biasUpdate);
+                }
+
+                // Add to averaged weights and increment the count.
+                if (Averaged)
+                {
+                    if (!_args.DoLazyUpdates)
+                        IncrementAverageNonLazy();
+                    else
+                        NumNoUpdates++;
+
+                    // Reset the weights to averages if needed.
+                    if (_resetWeightsAfterXExamples > 0 && NumIterExamples % _resetWeightsAfterXExamples == 0)
+                    {
+                        ch.Info("Resetting weights to average weights");
+                        VectorUtils.ScaleInto(in TotalWeights, 1 / (float)NumWeightUpdates, ref Weights);
+                        WeightsScale = 1;
+                        Bias = TotalBias / (float)NumWeightUpdates;
+                    }
                 }
             }
 
-#if OLD_TRACING // REVIEW: How should this be ported?
-            if (DebugLevel > 3)
+            /// <summary>
+            /// Add current weights and bias to average weights/bias.
+            /// </summary>
+            private void IncrementAverageNonLazy()
             {
-                // Output the weights.
-                Host.StdOut.Write("Weights after the instance are: ");
-                foreach (var iv in _weights.Items(all: true))
+                if (_args.RecencyGain == 0)
                 {
-                    Host.StdOut.Write('\t');
-                    Host.StdOut.Write(iv.Value * _weightsScale);
+                    VectorUtils.AddMult(in Weights, WeightsScale, ref TotalWeights);
+                    TotalBias += Bias;
+                    NumWeightUpdates++;
+                    return;
                 }
-                Host.StdOut.WriteLine();
-                Host.StdOut.WriteLine();
+                VectorUtils.AddMult(in Weights, Gain * WeightsScale, ref TotalWeights);
+                TotalBias += Gain * Bias;
+                NumWeightUpdates += Gain;
+                Gain = (_args.RecencyGainMulti ? Gain * _args.RecencyGain : Gain + _args.RecencyGain);
+
+                // If gains got too big, rescale!
+                if (Gain > 1000)
+                {
+                    const float scale = (float)1e-6;
+                    Gain *= scale;
+                    TotalBias *= scale;
+                    VectorUtils.ScaleBy(ref TotalWeights, scale);
+                    NumWeightUpdates *= scale;
+                }
             }
-#endif
         }
 
-        /// <summary>
-        /// Add current weights and bias to average weights/bias.
-        /// </summary>
-        protected void IncrementAverageNonLazy()
+        private protected AveragedLinearTrainer(AveragedLinearOptions options, IHostEnvironment env, string name, SchemaShape.Column label)
+            : base(options, env, name, label)
         {
-            if (Args.RecencyGain == 0)
-            {
-                VectorUtils.AddMult(ref Weights, WeightsScale, ref TotalWeights);
-                TotalBias += Bias;
-                NumWeightUpdates++;
-                return;
-            }
-            VectorUtils.AddMult(ref Weights, Gain * WeightsScale, ref TotalWeights);
-            TotalBias += Gain * Bias;
-            NumWeightUpdates += Gain;
-            Gain = (Args.RecencyGainMulti ? Gain * Args.RecencyGain : Gain + Args.RecencyGain);
+            Contracts.CheckUserArg(options.LearningRate > 0, nameof(options.LearningRate), UserErrorPositive);
+            Contracts.CheckUserArg(!options.ResetWeightsAfterXExamples.HasValue || options.ResetWeightsAfterXExamples > 0, nameof(options.ResetWeightsAfterXExamples), UserErrorPositive);
 
-            // If gains got too big, rescale!
-            if (Gain > 1000)
-            {
-                const Float scale = (Float)1e-6;
-                Gain *= scale;
-                TotalBias *= scale;
-                VectorUtils.ScaleBy(ref TotalWeights, scale);
-                NumWeightUpdates *= scale;
-            }
+            // Weights are scaled down by 2 * L2 regularization on each update step, so 0.5 would scale all weights to 0, which is not sensible.
+            Contracts.CheckUserArg(0 <= options.L2RegularizerWeight && options.L2RegularizerWeight < 0.5, nameof(options.L2RegularizerWeight), "must be in range [0, 0.5)");
+            Contracts.CheckUserArg(options.RecencyGain >= 0, nameof(options.RecencyGain), UserErrorNonNegative);
+            Contracts.CheckUserArg(options.AveragedTolerance >= 0, nameof(options.AveragedTolerance), UserErrorNonNegative);
+            // Verify user didn't specify parameters that conflict
+            Contracts.Check(!options.DoLazyUpdates || !options.RecencyGainMulti && options.RecencyGain == 0, "Cannot have both recency gain and lazy updates.");
+
+            AveragedLinearTrainerOptions = options;
         }
     }
 }

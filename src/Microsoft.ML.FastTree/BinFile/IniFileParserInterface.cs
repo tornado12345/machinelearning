@@ -4,10 +4,11 @@
 
 using System;
 using System.Linq;
-using System.Text;
 using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
     internal sealed class IniFileParserInterface
     {
@@ -42,15 +43,15 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
             [DllImport(DllName, CharSet = CharSet.Ansi, EntryPoint = "FeatureMapGetFeatureName")]
             [return: MarshalAs(UnmanagedType.U1)]
-            public unsafe static extern bool GetFeatureName(IntPtr pObject, UInt32 featureIndex, byte[] buffer, UInt32 sizeOfBuffer, IntPtr resultLength);
+            public static extern unsafe bool GetFeatureName(IntPtr pObject, UInt32 featureIndex, byte[] buffer, UInt32 sizeOfBuffer, IntPtr resultLength);
 
             [DllImport(DllName, CharSet = CharSet.Ansi, EntryPoint = "InputExtractorGetInputName")]
             [return: MarshalAs(UnmanagedType.U1)]
-            public unsafe static extern bool GetInputName(IntPtr pObject, UInt32 featureIndex, byte[] buffer, UInt32 sizeOfBuffer, IntPtr resultLength);
+            public static extern unsafe bool GetInputName(IntPtr pObject, UInt32 featureIndex, byte[] buffer, UInt32 sizeOfBuffer, IntPtr resultLength);
 
             [DllImport(DllName, CharSet = CharSet.Ansi)]
             [return: MarshalAs(UnmanagedType.U1)]
-            public unsafe static extern bool GetSectionContent(IntPtr pObject, string sectionName, byte[] buffer, UInt32 sizeOfBuffer, IntPtr resultLength);
+            public static extern unsafe bool GetSectionContent(IntPtr pObject, string sectionName, byte[] buffer, UInt32 sizeOfBuffer, IntPtr resultLength);
 
             [DllImport(DllName, EntryPoint = "InputExtractorGetInputCount")]
             public static extern UInt32 GetInputCount(IntPtr pObject);
@@ -59,17 +60,17 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             public static extern IntPtr GetInput(IntPtr pObject, UInt32 index);
 
             [DllImport(DllName, EntryPoint = "InputGetFeatures")]
-            public static unsafe extern void GetInputFeatures(IntPtr pInput, UInt32[] features, UInt32 sizeOfFeatures, out UInt32 featureCount);
+            public static extern unsafe void GetInputFeatures(IntPtr pInput, UInt32[] features, UInt32 sizeOfFeatures, out UInt32 featureCount);
 
             [DllImport(DllName, EntryPoint = "InputIsCopy")]
             [return: MarshalAs(UnmanagedType.U1)]
-            public unsafe static extern bool IsCopyInput(IntPtr pInput);
+            public static extern unsafe bool IsCopyInput(IntPtr pInput);
 
             [DllImport(DllName, EntryPoint = "InputEvaluate")]
-            public static unsafe extern double EvaluateInput(IntPtr pInput, UInt32* input);
+            public static extern unsafe double EvaluateInput(IntPtr pInput, UInt32* input);
 
             [DllImport(DllName, EntryPoint = "InputEvaluateMany")]
-            public static unsafe extern void EvaluateMany(IntPtr pInput, UInt32*[] inputs, double* outputs, UInt32 count);
+            public static extern unsafe void EvaluateMany(IntPtr pInput, UInt32*[] inputs, double* outputs, UInt32 count);
 
             [DllImport(DllName, EntryPoint = "InputExtractorGetFeatureMap")]
             public static extern IntPtr GetFeatureMap(IntPtr pExtractor);
@@ -253,8 +254,6 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             private readonly IntPtr _inputPtr;
 
             public int Id { get; }
-
-            public MD5Hash ContentMD5Hash => MD5Hasher.Hash(Content);
 
             // Return the name of the input
             public unsafe string Name => _parserInterface.GetInputName(Id);

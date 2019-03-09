@@ -3,6 +3,7 @@
 // See the LICENSE file in the project root for more information.
 
 using System;
+using Microsoft.ML.Data;
 
 namespace Microsoft.ML.Runtime
 {
@@ -23,6 +24,33 @@ namespace Microsoft.ML.Runtime
     }
 
     /// <summary>
+    /// Utility class for IHostEnvironment
+    /// </summary>
+    [BestFriend]
+    internal static class HostEnvironmentExtensions
+    {
+        /// <summary>
+        /// Return a file handle for an input "file".
+        /// </summary>
+        public static IFileHandle OpenInputFile(this IHostEnvironment env, string path)
+        {
+            Contracts.AssertValue(env);
+            Contracts.CheckNonWhiteSpace(path, nameof(path));
+            return new SimpleFileHandle(env, path, needsWrite: false, autoDelete: false);
+        }
+
+        /// <summary>
+        /// Create an output "file" and return a handle to it.
+        /// </summary>
+        public static IFileHandle CreateOutputFile(this IHostEnvironment env, string path)
+        {
+            Contracts.AssertValue(env);
+            Contracts.CheckNonWhiteSpace(path, nameof(path));
+            return new SimpleFileHandle(env, path, needsWrite: true, autoDelete: false);
+        }
+    }
+
+    /// <summary>
     /// The host environment interface creates hosts for components. Note that the methods of
     /// this interface should be called from the main thread for the environment. To get an environment
     /// to service another thread, call Fork and pass the return result to that thread.
@@ -32,14 +60,7 @@ namespace Microsoft.ML.Runtime
         /// <summary>
         /// Create a host with the given registration name.
         /// </summary>
-        IHost Register(string name, int? seed = null, bool? verbose = null, int? conc = null);
-
-        /// <summary>
-        /// How much concurrency the component should use. A value of 1 means
-        /// single-threaded. Higher values generally mean number of threads. Less
-        /// than 1 means whatever the component views as ideal.
-        /// </summary>
-        int ConcurrencyFactor { get; }
+        IHost Register(string name, int? seed = null, bool? verbose = null);
 
         /// <summary>
         /// Flag which indicate should we stop any code execution in this host.
@@ -47,26 +68,9 @@ namespace Microsoft.ML.Runtime
         bool IsCancelled { get; }
 
         /// <summary>
-        /// Return a file handle for an input "file".
+        /// The catalog of loadable components (<see cref="LoadableClassAttribute"/>) that are available in this host.
         /// </summary>
-        IFileHandle OpenInputFile(string path);
-
-        /// <summary>
-        /// Create an output "file" and return a handle to it.
-        /// </summary>
-        IFileHandle CreateOutputFile(string path);
-
-        /// <summary>
-        /// Create a temporary "file" and return a handle to it. Generally temp files are expected to be
-        /// written to exactly once, and then can be read multiple times.
-        /// Note that IFileHandle derives from IDisposable. Clients may dispose the IFileHandle when it is
-        /// no longer needed, but they are not required to. The host environment should track all temp file
-        /// handles and ensure that they are disposed properly when the environment is "shut down".
-        /// 
-        /// The suffix and prefix are optional. A common use for suffix is to specify an extension, eg, ".txt".
-        /// The use of suffix and prefix, including whether they have any affect, is up to the host enviroment.
-        /// </summary>
-        IFileHandle CreateTempFile(string suffix = null, string prefix = null);
+        ComponentCatalog ComponentCatalog { get; }
     }
 
     /// <summary>
@@ -80,7 +84,7 @@ namespace Microsoft.ML.Runtime
         /// The random number generator issued to this component. Note that random number
         /// generators are NOT thread safe.
         /// </summary>
-        IRandom Rand { get; }
+        Random Rand { get; }
 
         /// <summary>
         /// Signal to stop exection in this host and all its children.
@@ -99,11 +103,6 @@ namespace Microsoft.ML.Runtime
         /// The caller relinquishes ownership of the <paramref name="msg"/> object.
         /// </summary>
         void Send(TMessage msg);
-
-        /// <summary>
-        /// Called to indicate a normal shut-down of the pipe before disposing.
-        /// </summary>
-        void Done();
     }
 
     /// <summary>
@@ -144,7 +143,7 @@ namespace Microsoft.ML.Runtime
 
         /// <summary>
         /// For messages that contain information like column names from datasets.
-        /// Note that, despite being part of the schema, metadata should be treated
+        /// Note that, despite being part of the schema, annotations should be treated
         /// as user data, since it is often derived from user data. Note also that
         /// types, despite being part of the schema, are not considered "sensitive"
         /// as such, in the same way that column names might be.
@@ -169,7 +168,7 @@ namespace Microsoft.ML.Runtime
     /// <summary>
     /// A channel message.
     /// </summary>
-    public struct ChannelMessage
+    public readonly struct ChannelMessage
     {
         public readonly ChannelMessageKind Kind;
         public readonly MessageSensitivity Sensitivity;
@@ -181,7 +180,8 @@ namespace Microsoft.ML.Runtime
         /// </summary>
         public string Message => _args != null ? string.Format(_message, _args) : _message;
 
-        public ChannelMessage(ChannelMessageKind kind, MessageSensitivity sensitivity, string message)
+        [BestFriend]
+        internal ChannelMessage(ChannelMessageKind kind, MessageSensitivity sensitivity, string message)
         {
             Contracts.CheckNonEmpty(message, nameof(message));
             Kind = kind;
@@ -190,7 +190,8 @@ namespace Microsoft.ML.Runtime
             _args = null;
         }
 
-        public ChannelMessage(ChannelMessageKind kind, MessageSensitivity sensitivity, string fmt, params object[] args)
+        [BestFriend]
+        internal ChannelMessage(ChannelMessageKind kind, MessageSensitivity sensitivity, string fmt, params object[] args)
         {
             Contracts.CheckNonEmpty(fmt, nameof(fmt));
             Contracts.CheckNonEmpty(args, nameof(args));
@@ -219,10 +220,11 @@ namespace Microsoft.ML.Runtime
     /// <summary>
     /// General utility extension methods for objects in the "host" universe, i.e.,
     /// <see cref="IHostEnvironment"/>, <see cref="IHost"/>, and <see cref="IChannel"/>
-    /// that do not belong in more specific areas, e.g., <see cref="Contracts"/> or
+    /// that do not belong in more specific areas, for example, <see cref="Contracts"/> or
     /// component creation.
     /// </summary>
-    public static class HostExtensions
+    [BestFriend]
+    internal static class HostExtensions
     {
         public static T Apply<T>(this IHost host, string channelName, Func<IChannel, T> func)
         {
@@ -230,7 +232,6 @@ namespace Microsoft.ML.Runtime
             using (var ch = host.Start(channelName))
             {
                 t = func(ch);
-                ch.Done();
             }
             return t;
         }
@@ -247,7 +248,7 @@ namespace Microsoft.ML.Runtime
         /// setting <see cref="MessageSensitivity.Unknown"/>.
         /// </summary>
         public static void Trace(this IChannel ch, string fmt, params object[] args)
-            => ch.Trace(MessageSensitivity.Unknown, fmt);
+            => ch.Trace(MessageSensitivity.Unknown, fmt, args);
 
         /// <summary>
         /// Convenience variant of <see cref="IChannel.Error(MessageSensitivity, string)"/>

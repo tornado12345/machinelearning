@@ -4,17 +4,19 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
     /// <summary>
     /// This implementation is based on:
     /// Friedman, J., Hastie, T. and Tibshirani, R. (2008) Regularization
     /// Paths for Generalized Linear Models via Coordinate Descent.
-    /// http://www-stat.stanford.edu/~hastie/Papers/glmnet.pdf
+    /// https://www-stat.stanford.edu/~hastie/Papers/glmnet.pdf
     /// </summary>
     /// <remarks>Author was Yasser Ganjisaffar during his internship.</remarks>
-    public class LassoBasedEnsembleCompressor : IEnsembleCompressor<short>
+    internal class LassoBasedEnsembleCompressor : IEnsembleCompressor<short>
     {
         // This module shouldn't consume more than 4GB of memory
         private const long MaxAvailableMemory = 4L * 1024 * 1024 * 1024;
@@ -49,7 +51,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
         private Dataset _trainSet;
         private short[] _labels;
-        private Ensemble _compressedEnsemble;
+        private InternalTreeEnsemble _compressedEnsemble;
         private int[] _sampleObservationIndices;
         private Random _rnd;
 
@@ -164,7 +166,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
         private LassoFit GetLassoFit(IChannel ch, int maxAllowedFeaturesPerModel)
         {
-            DateTime startTime = DateTime.Now;
+            Stopwatch stopWatch = Stopwatch.StartNew();
 
             if (maxAllowedFeaturesPerModel < 0)
             {
@@ -450,15 +452,15 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             // First lambda was infinity; fixing it
             fit.Lambdas[0] = Math.Exp(2 * Math.Log(fit.Lambdas[1]) - Math.Log(fit.Lambdas[2]));
 
-            TimeSpan duration = DateTime.Now - startTime;
-            ch.Info("Elapsed time for compression: {0}", duration);
+            stopWatch.Stop();
+            ch.Info("Elapsed time for compression: {0}", stopWatch.Elapsed);
 
             return fit;
         }
 
-        private Ensemble GetEnsembleFromSolution(LassoFit fit, int solutionIdx, Ensemble originalEnsemble)
+        private InternalTreeEnsemble GetEnsembleFromSolution(LassoFit fit, int solutionIdx, InternalTreeEnsemble originalEnsemble)
         {
-            Ensemble ensemble = new Ensemble();
+            InternalTreeEnsemble ensemble = new InternalTreeEnsemble();
 
             int weightsCount = fit.NumberOfWeights[solutionIdx];
             for (int i = 0; i < weightsCount; i++)
@@ -466,7 +468,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
                 double weight = fit.CompressedWeights[solutionIdx][i];
                 if (weight != 0)
                 {
-                    RegressionTree tree = originalEnsemble.GetTreeAt(fit.Indices[i]);
+                    InternalRegressionTree tree = originalEnsemble.GetTreeAt(fit.Indices[i]);
                     tree.Weight = weight;
                     ensemble.AddTree(tree);
                 }
@@ -532,7 +534,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             }
         }
 
-        public bool Compress(IChannel ch, Ensemble ensemble, double[] trainScores, int bestIteration, int maxTreesAfterCompression)
+        bool IEnsembleCompressor<short>.Compress(IChannel ch, InternalTreeEnsemble ensemble, double[] trainScores, int bestIteration, int maxTreesAfterCompression)
         {
             LoadTargets(trainScores, bestIteration);
 
@@ -550,7 +552,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             return true;
         }
 
-        public Ensemble GetCompressedEnsemble()
+        InternalTreeEnsemble IEnsembleCompressor<short>.GetCompressedEnsemble()
         {
             return _compressedEnsemble;
         }

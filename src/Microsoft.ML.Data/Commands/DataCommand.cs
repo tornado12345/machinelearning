@@ -6,60 +6,66 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Microsoft.ML.Runtime.Command;
-using Microsoft.ML.Runtime.CommandLine;
-using Microsoft.ML.Runtime.Internal.Utilities;
-using Microsoft.ML.Runtime.Model;
+using Microsoft.Data.DataView;
+using Microsoft.ML.Command;
+using Microsoft.ML.CommandLine;
+using Microsoft.ML.Data.IO;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Model;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.Data
+namespace Microsoft.ML.Data
 {
     /// <summary>
     /// This holds useful base classes for commands that ingest a primary dataset and deal with associated model files.
     /// </summary>
-    public static class DataCommand
+    [BestFriend]
+    internal static class DataCommand
     {
         public abstract class ArgumentsBase
         {
-            [Argument(ArgumentType.Multiple, HelpText = "The data loader", ShortName = "loader", SortOrder = 1, NullName = "<Auto>")]
-            public SubComponent<IDataLoader, SignatureDataLoader> Loader;
+            [Argument(ArgumentType.Multiple, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly, HelpText = "The data loader", ShortName = "loader", SortOrder = 1, NullName = "<Auto>", SignatureType = typeof(SignatureDataLoader))]
+            public IComponentFactory<IMultiStreamSource, ILegacyDataLoader> Loader;
 
             [Argument(ArgumentType.AtMostOnce, IsInputFileName = true, HelpText = "The data file", ShortName = "data", SortOrder = 0)]
             public string DataFile;
 
-            [Argument(ArgumentType.AtMostOnce, HelpText = "Model file to save", ShortName = "out")]
+            [Argument(ArgumentType.AtMostOnce, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly, HelpText = "Model file to save", ShortName = "out")]
             public string OutputModelFile;
 
-            [Argument(ArgumentType.AtMostOnce, IsInputFileName = true, HelpText = "Model file to load", ShortName = "in", SortOrder = 90)]
+            [Argument(ArgumentType.AtMostOnce, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly, IsInputFileName = true, HelpText = "Model file to load", ShortName = "in", SortOrder = 90)]
             public string InputModelFile;
 
-            [Argument(ArgumentType.Multiple, HelpText = "Load transforms from model file?", ShortName = "loadTrans", SortOrder = 91)]
+            [Argument(ArgumentType.Multiple, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly, HelpText = "Load transforms from model file?", ShortName = "loadTrans", SortOrder = 91)]
             public bool? LoadTransforms;
 
-            [Argument(ArgumentType.AtMostOnce, HelpText = "Random seed", ShortName = "seed", SortOrder = 101)]
+            [Argument(ArgumentType.AtMostOnce, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly, HelpText = "Random seed", ShortName = "seed", SortOrder = 101)]
             public int? RandomSeed;
 
-            [Argument(ArgumentType.AtMostOnce, HelpText = "Verbose?", ShortName = "v", Hide = true)]
+            [Argument(ArgumentType.AtMostOnce, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly, HelpText = "Verbose?", ShortName = "v", Hide = true)]
             public bool? Verbose;
 
-            [Argument(ArgumentType.AtMostOnce, HelpText = "The web server to publish the RESTful API", Hide = true)]
+            [Argument(ArgumentType.AtMostOnce, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly, HelpText = "The web server to publish the RESTful API", Hide = true)]
             public ServerChannel.IServerFactory Server;
 
             // This is actually an advisory value. The implementations themselves are responsible for
             // determining what they consider appropriate, and the actual heuristics is a bit more
             // complex than just this.
-            [Argument(ArgumentType.LastOccurenceWins,
+            [Argument(ArgumentType.LastOccurenceWins, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly,
                 HelpText = "Desired degree of parallelism in the data pipeline", ShortName = "n")]
             public int? Parallel;
 
-            [Argument(ArgumentType.Multiple, HelpText = "Transform", ShortName = "xf")]
-            public KeyValuePair<string, SubComponent<IDataTransform, SignatureDataTransform>>[] Transform;
+            [Argument(ArgumentType.Multiple, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly,
+                HelpText = "Transform", Name ="Transform", ShortName = "xf", SignatureType = typeof(SignatureDataTransform))]
+            public KeyValuePair<string, IComponentFactory<IDataView, IDataTransform>>[] Transforms;
         }
 
-        public abstract class ImplBase<TArgs> : ICommand
-            where TArgs : ArgumentsBase
+        [BestFriend]
+        internal abstract class ImplBase<TOptions> : ICommand
+            where TOptions : ArgumentsBase
         {
             protected readonly IHost Host;
-            protected readonly TArgs Args;
+            protected readonly TOptions ImplOptions;
             private readonly ServerChannel.IServerFactory _serverFactory;
 
             protected ServerChannel.IServer InitServer(IChannel ch)
@@ -69,39 +75,33 @@ namespace Microsoft.ML.Runtime.Data
                 return _serverFactory?.CreateComponent(Host, ch);
             }
 
-            /// <summary>
-            /// The degree of concurrency is passed in the conc parameter. If it is null, the value
-            /// of args.parralel is used. If that is null, zero is used (which means "automatic").
-            /// </summary>
-            protected ImplBase(IHostEnvironment env, TArgs args, string name, int? conc = null)
+            protected ImplBase(IHostEnvironment env, TOptions options, string name)
             {
                 Contracts.CheckValue(env, nameof(env));
 
                 // Note that env may be null here, which is OK since the CheckXxx methods are extension
                 // methods designed to allow null.
-                env.CheckValue(args, nameof(args));
-                env.CheckParam(conc == null || conc >= 0, nameof(conc), "Degree of concurrency must be non-negative (or null)");
+                env.CheckValue(options, nameof(options));
 
-                conc = conc ?? args.Parallel;
-                env.CheckUserArg(!(conc < 0), nameof(args.Parallel), "Degree of parallelism must be non-negative (or null)");
+                env.CheckUserArg(!(options.Parallel < 0), nameof(options.Parallel), "Degree of parallelism must be non-negative (or null)");
 
                 // Capture the environment options from args.
-                env = env.Register(name, args.RandomSeed, args.Verbose, conc);
+                env = env.Register(name, options.RandomSeed, options.Verbose);
 
                 env.CheckNonWhiteSpace(name, nameof(name));
                 Host = env.Register(name);
-                Args = args;
-                _serverFactory = args.Server;
-                Utils.CheckOptionalUserDirectory(args.OutputModelFile, nameof(args.OutputModelFile));
+                ImplOptions = options;
+                _serverFactory = options.Server;
+                Utils.CheckOptionalUserDirectory(options.OutputModelFile, nameof(options.OutputModelFile));
             }
 
-            protected ImplBase(ImplBase<TArgs> impl, string name)
+            protected ImplBase(ImplBase<TOptions> impl, string name)
             {
                 Contracts.CheckValue(impl, nameof(impl));
                 Contracts.AssertValue(impl.Host);
-                impl.Host.AssertValue(impl.Args);
+                impl.Host.AssertValue(impl.ImplOptions);
                 impl.Host.AssertValue(name);
-                Args = impl.Args;
+                ImplOptions = impl.ImplOptions;
                 Host = impl.Host.Register(name);
             }
 
@@ -112,26 +112,27 @@ namespace Microsoft.ML.Runtime.Data
                 using (var pipe = prov.StartPipe<TelemetryMessage>("TelemetryPipe"))
                 {
                     SendTelemetryCore(pipe);
-                    pipe.Done();
                 }
             }
 
-            protected void SendTelemetryComponent(IPipe<TelemetryMessage> pipe, SubComponent sub)
+            protected void SendTelemetryComponent(IPipe<TelemetryMessage> pipe, IComponentFactory factory)
             {
                 Host.AssertValue(pipe);
-                Host.AssertValueOrNull(sub);
+                Host.AssertValueOrNull(factory);
 
-                if (sub.IsGood())
-                    pipe.Send(TelemetryMessage.CreateTrainer(sub.Kind, sub.SubComponentSettings));
+                if (factory is ICommandLineComponentFactory commandLineFactory)
+                    pipe.Send(TelemetryMessage.CreateTrainer(commandLineFactory.Name, commandLineFactory.GetSettingsString()));
+                else
+                    pipe.Send(TelemetryMessage.CreateTrainer("Unknown", "Non-ICommandLineComponentFactory object"));
             }
 
             protected virtual void SendTelemetryCore(IPipe<TelemetryMessage> pipe)
             {
                 Contracts.AssertValue(pipe);
 
-                if (Args.Transform != null)
+                if (ImplOptions.Transforms != null)
                 {
-                    foreach (var transform in Args.Transform)
+                    foreach (var transform in ImplOptions.Transforms)
                         SendTelemetryComponent(pipe, transform.Value);
                 }
             }
@@ -147,7 +148,6 @@ namespace Microsoft.ML.Runtime.Data
                         foreach (var pair in averageMetric)
                             pipe.Send(TelemetryMessage.CreateMetric(pair.Key, pair.Value, null));
                     }
-                    pipe.Done();
                 }
             }
 
@@ -156,17 +156,18 @@ namespace Microsoft.ML.Runtime.Data
                 Dictionary<string, double> averageMetric = new Dictionary<string, double>();
                 foreach (Dictionary<string, IDataView> mValue in metricValues)
                 {
-                    using (var cursor = mValue.First().Value.GetRowCursor(col => true))
+                    var data = mValue.First().Value;
+                    using (var cursor = data.GetRowCursorForAllColumns())
                     {
                         while (cursor.MoveNext())
                         {
-                            for (int currentIndex = 0; currentIndex < cursor.Schema.ColumnCount; currentIndex++)
+                            for (int currentIndex = 0; currentIndex < cursor.Schema.Count; currentIndex++)
                             {
-                                var nameOfMetric = "TLC_" + cursor.Schema.GetColumnName(currentIndex);
-                                var type = cursor.Schema.GetColumnType(currentIndex);
-                                if (type.IsNumber)
+                                var nameOfMetric = "TLC_" + cursor.Schema[currentIndex].Name;
+                                var type = cursor.Schema[currentIndex].Type;
+                                if (type is NumberDataViewType)
                                 {
-                                    var getter = RowCursorUtils.GetGetterAs<double>(NumberType.R8, cursor, currentIndex);
+                                    var getter = RowCursorUtils.GetGetterAs<double>(NumberDataViewType.Double, cursor, currentIndex);
                                     double metricValue = 0;
                                     getter(ref metricValue);
                                     if (averageMetric.ContainsKey(nameOfMetric))
@@ -201,23 +202,23 @@ namespace Microsoft.ML.Runtime.Data
                 SendTelemetryMetricCore(Host, newAverageMetric);
             }
 
-            protected IDataLoader LoadLoader(RepositoryReader rep, string path, bool loadTransforms)
+            protected ILegacyDataLoader LoadLoader(RepositoryReader rep, string path, bool loadTransforms)
             {
                 return ModelFileUtils.LoadLoader(Host, rep, new MultiFileSource(path), loadTransforms);
             }
 
-            protected void SaveLoader(IDataLoader loader, string path)
+            protected void SaveLoader(ILegacyDataLoader loader, string path)
             {
                 using (var file = Host.CreateOutputFile(path))
                     LoaderUtils.SaveLoader(loader, file);
             }
 
-            protected IDataLoader CreateAndSaveLoader(string defaultLoader = "TextLoader")
+            protected ILegacyDataLoader CreateAndSaveLoader(Func<IHostEnvironment, IMultiStreamSource, ILegacyDataLoader> defaultLoaderFactory = null)
             {
-                var loader = CreateLoader(defaultLoader);
-                if (!string.IsNullOrWhiteSpace(Args.OutputModelFile))
+                var loader = CreateLoader(defaultLoaderFactory);
+                if (!string.IsNullOrWhiteSpace(ImplOptions.OutputModelFile))
                 {
-                    using (var file = Host.CreateOutputFile(Args.OutputModelFile))
+                    using (var file = Host.CreateOutputFile(ImplOptions.OutputModelFile))
                         LoaderUtils.SaveLoader(loader, file);
                 }
                 return loader;
@@ -247,12 +248,12 @@ namespace Microsoft.ML.Runtime.Data
                 IChannel ch,
                 bool? wantPredictor, out IPredictor predictor,
                 bool wantTrainSchema, out RoleMappedSchema trainSchema,
-                out IDataLoader pipe)
+                out ILegacyDataLoader pipe)
             {
                 // First handle the case where there is no input model file.
                 // Everything must come from the command line.
 
-                using (var file = Host.OpenInputFile(Args.InputModelFile))
+                using (var file = Host.OpenInputFile(ImplOptions.InputModelFile))
                 using (var strm = file.OpenReadStream())
                 using (var rep = RepositoryReader.Open(strm, Host))
                 {
@@ -268,28 +269,28 @@ namespace Microsoft.ML.Runtime.Data
                     }
 
                     // Next create the loader.
-                    var sub = Args.Loader;
-                    IDataLoader trainPipe = null;
-                    if (sub.IsGood())
+                    var loaderFactory = ImplOptions.Loader;
+                    ILegacyDataLoader trainPipe = null;
+                    if (loaderFactory != null)
                     {
                         // The loader is overridden from the command line.
-                        pipe = sub.CreateInstance(Host, new MultiFileSource(Args.DataFile));
-                        if (Args.LoadTransforms == true)
+                        pipe = loaderFactory.CreateComponent(Host, new MultiFileSource(ImplOptions.DataFile));
+                        if (ImplOptions.LoadTransforms == true)
                         {
-                            Host.CheckUserArg(!string.IsNullOrWhiteSpace(Args.InputModelFile), nameof(Args.InputModelFile));
+                            Host.CheckUserArg(!string.IsNullOrWhiteSpace(ImplOptions.InputModelFile), nameof(ImplOptions.InputModelFile));
                             pipe = LoadTransformChain(pipe);
                         }
                     }
                     else
                     {
-                        var loadTrans = Args.LoadTransforms ?? true;
-                        pipe = LoadLoader(rep, Args.DataFile, loadTrans);
+                        var loadTrans = ImplOptions.LoadTransforms ?? true;
+                        pipe = LoadLoader(rep, ImplOptions.DataFile, loadTrans);
                         if (loadTrans)
                             trainPipe = pipe;
                     }
 
-                    if (Utils.Size(Args.Transform) > 0)
-                        pipe = CompositeDataLoader.Create(Host, pipe, Args.Transform);
+                    if (Utils.Size(ImplOptions.Transforms) > 0)
+                        pipe = LegacyCompositeDataLoader.Create(Host, pipe, ImplOptions.Transforms);
 
                     // Next consider loading the training data's role mapped schema.
                     trainSchema = null;
@@ -305,7 +306,7 @@ namespace Microsoft.ML.Runtime.Data
                             // can be loaded with no data at all, to get their schemas.
                             if (trainPipe == null)
                                 trainPipe = ModelFileUtils.LoadLoader(Host, rep, new MultiFileSource(null), loadTransforms: true);
-                            trainSchema = RoleMappedSchema.Create(trainPipe.Schema, trainRoleMappings);
+                            trainSchema = new RoleMappedSchema(trainPipe.Schema, trainRoleMappings);
                         }
                         // If the role mappings are null, an alternative would be to fail. However the idea
                         // is that the scorer should always still succeed, although perhaps with reduced
@@ -316,37 +317,40 @@ namespace Microsoft.ML.Runtime.Data
                 }
             }
 
-            protected IDataLoader CreateLoader(string defaultLoader = "TextLoader")
+            protected ILegacyDataLoader CreateLoader(Func<IHostEnvironment, IMultiStreamSource, ILegacyDataLoader> defaultLoaderFactory = null)
             {
-                var loader = CreateRawLoader(defaultLoader);
+                var loader = CreateRawLoader(defaultLoaderFactory);
                 loader = CreateTransformChain(loader);
                 return loader;
             }
 
-            private IDataLoader CreateTransformChain(IDataLoader loader)
+            private ILegacyDataLoader CreateTransformChain(ILegacyDataLoader loader)
             {
-                return CompositeDataLoader.Create(Host, loader, Args.Transform);
+                return LegacyCompositeDataLoader.Create(Host, loader, ImplOptions.Transforms);
             }
 
-            protected IDataLoader CreateRawLoader(string defaultLoader = "TextLoader", string dataFile = null)
+            protected ILegacyDataLoader CreateRawLoader(
+                Func<IHostEnvironment, IMultiStreamSource, ILegacyDataLoader> defaultLoaderFactory = null,
+                string dataFile = null)
             {
                 if (string.IsNullOrWhiteSpace(dataFile))
-                    dataFile = Args.DataFile;
+                    dataFile = ImplOptions.DataFile;
 
-                IDataLoader loader;
-                if (!string.IsNullOrWhiteSpace(Args.InputModelFile) && !Args.Loader.IsGood())
+                ILegacyDataLoader loader;
+                if (!string.IsNullOrWhiteSpace(ImplOptions.InputModelFile) && ImplOptions.Loader == null)
                 {
                     // Load the loader from the data model.
-                    using (var file = Host.OpenInputFile(Args.InputModelFile))
+                    using (var file = Host.OpenInputFile(ImplOptions.InputModelFile))
                     using (var strm = file.OpenReadStream())
                     using (var rep = RepositoryReader.Open(strm, Host))
-                        loader = LoadLoader(rep, dataFile, Args.LoadTransforms ?? true);
+                        loader = LoadLoader(rep, dataFile, ImplOptions.LoadTransforms ?? true);
                 }
                 else
                 {
                     // Either there is no input model file, or there is, but the loader is overridden.
-                    var sub = Args.Loader;
-                    if (!sub.IsGood())
+                    IMultiStreamSource fileSource = new MultiFileSource(dataFile);
+                    var loaderFactory = ImplOptions.Loader;
+                    if (loaderFactory == null)
                     {
                         var ext = Path.GetExtension(dataFile);
                         var isText =
@@ -354,48 +358,68 @@ namespace Microsoft.ML.Runtime.Data
                             string.Equals(ext, ".tlc", StringComparison.OrdinalIgnoreCase);
                         var isBinary = string.Equals(ext, ".idv", StringComparison.OrdinalIgnoreCase);
                         var isTranspose = string.Equals(ext, ".tdv", StringComparison.OrdinalIgnoreCase);
-                        sub =
-                            new SubComponent<IDataLoader, SignatureDataLoader>(
-                                isText ? "TextLoader" : isBinary ? "BinaryLoader" : isTranspose ? "TransposeLoader" : defaultLoader);
+
+                        return isText ? TextLoader.Create(Host, new TextLoader.Options(), fileSource) :
+                               isBinary ? new BinaryLoader(Host, new BinaryLoader.Arguments(), fileSource) :
+                               isTranspose ? new TransposeLoader(Host, new TransposeLoader.Arguments(), fileSource) :
+                               defaultLoaderFactory != null ? defaultLoaderFactory(Host, fileSource) :
+                               TextLoader.Create(Host, new TextLoader.Options(), fileSource);
+                    }
+                    else
+                    {
+                        loader = loaderFactory.CreateComponent(Host, fileSource);
                     }
 
-                    loader = sub.CreateInstance(Host, new MultiFileSource(dataFile));
-
-                    if (Args.LoadTransforms == true)
+                    if (ImplOptions.LoadTransforms == true)
                     {
-                        Host.CheckUserArg(!string.IsNullOrWhiteSpace(Args.InputModelFile), nameof(Args.InputModelFile));
+                        Host.CheckUserArg(!string.IsNullOrWhiteSpace(ImplOptions.InputModelFile), nameof(ImplOptions.InputModelFile));
                         loader = LoadTransformChain(loader);
                     }
                 }
                 return loader;
             }
 
-            private IDataLoader LoadTransformChain(IDataLoader srcData)
+            private ILegacyDataLoader LoadTransformChain(ILegacyDataLoader srcData)
             {
-                Host.Assert(!string.IsNullOrWhiteSpace(Args.InputModelFile));
+                Host.Assert(!string.IsNullOrWhiteSpace(ImplOptions.InputModelFile));
 
-                using (var file = Host.OpenInputFile(Args.InputModelFile))
+                using (var file = Host.OpenInputFile(ImplOptions.InputModelFile))
                 using (var strm = file.OpenReadStream())
                 using (var rep = RepositoryReader.Open(strm, Host))
                 using (var pipeLoaderEntry = rep.OpenEntry(ModelFileUtils.DirDataLoaderModel, ModelLoadContext.ModelStreamName))
                 using (var ctx = new ModelLoadContext(rep, pipeLoaderEntry, ModelFileUtils.DirDataLoaderModel))
-                    return CompositeDataLoader.Create(Host, ctx, srcData, x => true);
+                    return LegacyCompositeDataLoader.Create(Host, ctx, srcData, x => true);
             }
         }
     }
 
-    public static class LoaderUtils
+    [BestFriend]
+    internal static class LoaderUtils
     {
         /// <summary>
         /// Saves <paramref name="loader"/> to the specified <paramref name="file"/>.
         /// </summary>
-        public static void SaveLoader(IDataLoader loader, IFileHandle file)
+        public static void SaveLoader(ILegacyDataLoader loader, IFileHandle file)
         {
             Contracts.CheckValue(loader, nameof(loader));
             Contracts.CheckValue(file, nameof(file));
             Contracts.CheckParam(file.CanWrite, nameof(file), "Must be writable");
 
             using (var stream = file.CreateWriteStream())
+            {
+                SaveLoader(loader, stream);
+            }
+        }
+
+        /// <summary>
+        /// Saves <paramref name="loader"/> to the specified <paramref name="stream"/>.
+        /// </summary>
+        public static void SaveLoader(ILegacyDataLoader loader, Stream stream)
+        {
+            Contracts.CheckValue(loader, nameof(loader));
+            Contracts.CheckValue(stream, nameof(stream));
+            Contracts.CheckParam(stream.CanWrite, nameof(stream), "Must be writable");
+
             using (var rep = RepositoryWriter.CreateNew(stream))
             {
                 ModelSaveContext.SaveModel(rep, loader, ModelFileUtils.DirDataLoaderModel);

@@ -6,15 +6,15 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
-using System.Threading;
 
-namespace Microsoft.ML.Runtime.Data
+namespace Microsoft.ML.Runtime
 {
     /// <summary>
     /// Base class for channel providers. This is a common base class for<see cref="HostEnvironmentBase{THostEnvironmentBase}"/>.
     /// The ParentFullName, ShortName, and FullName may be null or empty.
     /// </summary>
-    public abstract class ChannelProviderBase : IExceptionContext
+    [BestFriend]
+    internal abstract class ChannelProviderBase : IExceptionContext
     {
         /// <summary>
         /// Data keys that are attached to the exception thrown via the exception context.
@@ -78,7 +78,8 @@ namespace Microsoft.ML.Runtime.Data
     /// <summary>
     /// Message source (a channel) that generated the message being dispatched.
     /// </summary>
-    public interface IMessageSource
+    [BestFriend]
+    internal interface IMessageSource
     {
         string ShortName { get; }
         string FullName { get; }
@@ -86,34 +87,13 @@ namespace Microsoft.ML.Runtime.Data
     }
 
     /// <summary>
-    /// A <see cref="IHostEnvironment"/> that is also a channel listener can attach
-    /// listeners for messages, as sent through <see cref="IChannelProvider.StartPipe"/>.
-    /// </summary>
-    public interface IMessageDispatcher : IHostEnvironment
-    {
-        /// <summary>
-        /// Listen on this environment to messages of a particular type.
-        /// </summary>
-        /// <typeparam name="TMessage">The message type</typeparam>
-        /// <param name="listenerFunc">The action to perform when a message of the
-        /// appropriate type is received.</param>
-        void AddListener<TMessage>(Action<IMessageSource, TMessage> listenerFunc);
-
-        /// <summary>
-        /// Removes a previously added listener.
-        /// </summary>
-        /// <typeparam name="TMessage">The message type</typeparam>
-        /// <param name="listenerFunc">The previous listener function that is now being removed.</param>
-        void RemoveListener<TMessage>(Action<IMessageSource, TMessage> listenerFunc);
-    }
-
-    /// <summary>
     /// A basic host environment suited for many environments.
-    /// This also supports modifying the concurrency factor, provides the ability to subscribe to pipes via the 
+    /// This also supports modifying the concurrency factor, provides the ability to subscribe to pipes via the
     /// AddListener/RemoveListener methods, and exposes the <see cref="ProgressReporting.ProgressTracker"/> to
     /// query progress.
     /// </summary>
-    public abstract class HostEnvironmentBase<TEnv> : ChannelProviderBase, IHostEnvironment, IDisposable, IChannelProvider, IMessageDispatcher
+    [BestFriend]
+    internal abstract class HostEnvironmentBase<TEnv> : ChannelProviderBase, IHostEnvironment, IChannelProvider
         where TEnv : HostEnvironmentBase<TEnv>
     {
         /// <summary>
@@ -125,13 +105,13 @@ namespace Microsoft.ML.Runtime.Data
         {
             public override int Depth { get; }
 
-            public IRandom Rand => _rand;
+            public Random Rand => _rand;
 
             // We don't have dispose mechanism for hosts, so to let GC collect children hosts we make them WeakReference.
             private readonly List<WeakReference<IHost>> _children;
 
-            public HostBase(HostEnvironmentBase<TEnv> source, string shortName, string parentFullName, IRandom rand, bool verbose, int? conc)
-                : base(source, rand, verbose, conc, shortName, parentFullName)
+            public HostBase(HostEnvironmentBase<TEnv> source, string shortName, string parentFullName, Random rand, bool verbose)
+                : base(source, rand, verbose, shortName, parentFullName)
             {
                 Depth = source.Depth + 1;
                 _children = new List<WeakReference<IHost>>();
@@ -151,14 +131,14 @@ namespace Microsoft.ML.Runtime.Data
                 }
             }
 
-            public new IHost Register(string name, int? seed = null, bool? verbose = null, int? conc = null)
+            public new IHost Register(string name, int? seed = null, bool? verbose = null)
             {
                 Contracts.CheckNonEmpty(name, nameof(name));
                 IHost host;
                 lock (_cancelLock)
                 {
-                    IRandom rand = (seed.HasValue) ? RandomUtils.Create(seed.Value) : RandomUtils.Create(_rand);
-                    host = RegisterCore(this, name, Master?.FullName, rand, verbose ?? Verbose, conc ?? _conc);
+                    Random rand = (seed.HasValue) ? RandomUtils.Create(seed.Value) : RandomUtils.Create(_rand);
+                    host = RegisterCore(this, name, Master?.FullName, rand, verbose ?? Verbose);
                     if (!IsCancelled)
                         _children.Add(new WeakReference<IHost>(host));
                 }
@@ -175,15 +155,12 @@ namespace Microsoft.ML.Runtime.Data
         {
             public override int Depth { get; }
 
-            /// <summary>
-            /// Whether this pipe is still active.
-            /// </summary>
-            public bool IsActive { get; private set; }
-
             // The delegate to call to dispatch messages.
             protected readonly Action<IMessageSource, TMessage> Dispatch;
 
             public readonly ChannelProviderBase Parent;
+
+            private bool _disposed;
 
             protected PipeBase(ChannelProviderBase parent, string shortName,
                 Action<IMessageSource, TMessage> dispatch)
@@ -193,23 +170,20 @@ namespace Microsoft.ML.Runtime.Data
                 Contracts.AssertValue(dispatch);
                 Parent = parent;
                 Depth = parent.Depth + 1;
-                IsActive = true;
                 Dispatch = dispatch;
-            }
-
-            public virtual void Done()
-            {
-                IsActive = false;
             }
 
             public void Dispose()
             {
-                DisposeCore();
+                if(!_disposed)
+                {
+                    Dispose(true);
+                    _disposed = true;
+                }
             }
 
-            protected virtual void DisposeCore()
+            protected virtual void Dispose(bool disposing)
             {
-                IsActive = false;
             }
 
             public void Send(TMessage msg)
@@ -315,7 +289,7 @@ namespace Microsoft.ML.Runtime.Data
             /// This field is actually used as a <see cref="MulticastDelegate"/>, which holds the listener actions
             /// for all listeners that are currently subscribed. The action itself is an immutable object, so every time
             /// any listener subscribes or unsubscribes, the field is replaced with a modified version of the delegate.
-            /// 
+            ///
             /// The field can be null, if no listener is currently subscribed.
             /// </summary>
             private volatile Action<IMessageSource, TMessage> _listenerAction;
@@ -355,66 +329,48 @@ namespace Microsoft.ML.Runtime.Data
         // doesn't free temp files. That is handled when the master is disposed.
         protected readonly HostEnvironmentBase<TEnv> Master;
 
-        // Protects _tempFiles.
-        private readonly object _tempLock;
-
-        // Temp files that have been handed out.
-        // When this is null, the host environment has been disposed.
-        private volatile List<IFileHandle> _tempFiles;
-
         // Protect _cancellation logic.
         private readonly object _cancelLock;
 
         // The random number generator for this host.
-        private readonly IRandom _rand;
+        private readonly Random _rand;
         // A dictionary mapping the type of message to the Dispatcher that gets the strongly typed dispatch delegate.
         protected readonly ConcurrentDictionary<Type, Dispatcher> ListenerDict;
 
         protected readonly ProgressReporting.ProgressTracker ProgressTracker;
 
-        // Can be set dynamically.
-        private int? _conc;
-
-        /// <summary>
-        /// This host environment supports changing this value dynamically.
-        /// </summary>
-        public int ConcurrencyFactor { get { return _conc ?? Master.ConcurrencyFactor; } set { _conc = value; } }
-
         public bool IsCancelled { get; protected set; }
 
-        public override int Depth => 0;
+        public ComponentCatalog ComponentCatalog { get; }
 
-        protected bool IsDisposed => _tempFiles == null;
+        public override int Depth => 0;
 
         /// <summary>
         ///  The main constructor.
         /// </summary>
-        protected HostEnvironmentBase(IRandom rand, bool verbose, int conc,
+        protected HostEnvironmentBase(Random rand, bool verbose,
             string shortName = null, string parentFullName = null)
             : base(shortName, parentFullName, verbose)
         {
             Contracts.CheckValueOrNull(rand);
             _rand = rand ?? RandomUtils.Create();
-            _conc = conc;
             ListenerDict = new ConcurrentDictionary<Type, Dispatcher>();
             ProgressTracker = new ProgressReporting.ProgressTracker(this);
             _cancelLock = new object();
-            _tempLock = new object();
-            _tempFiles = new List<IFileHandle>();
             Root = this as TEnv;
+            ComponentCatalog = new ComponentCatalog();
         }
 
         /// <summary>
         /// This constructor is for forking.
         /// </summary>
-        protected HostEnvironmentBase(HostEnvironmentBase<TEnv> source, IRandom rand, bool verbose,
-            int? conc, string shortName = null, string parentFullName = null)
+        protected HostEnvironmentBase(HostEnvironmentBase<TEnv> source, Random rand, bool verbose,
+            string shortName = null, string parentFullName = null)
             : base(shortName, parentFullName, verbose)
         {
             Contracts.CheckValue(source, nameof(source));
             Contracts.CheckValueOrNull(rand);
             _rand = rand ?? RandomUtils.Create();
-            _conc = conc;
             _cancelLock = new object();
 
             // This fork shares some stuff with the master.
@@ -422,51 +378,18 @@ namespace Microsoft.ML.Runtime.Data
             Root = source.Root;
             ListenerDict = source.ListenerDict;
             ProgressTracker = source.ProgressTracker;
+            ComponentCatalog = source.ComponentCatalog;
         }
 
-        /// <summary>
-        /// Dispose the environment. This ensures that all temp file handles are properly disposed,
-        /// including deleting the physical files.
-        /// </summary>
-        public virtual void Dispose()
-        {
-            if (Master != null)
-            {
-                // Disposing a fork has no affect.
-                return;
-            }
-
-            List<IFileHandle> temps;
-            lock (_tempLock)
-            {
-                temps = _tempFiles;
-                _tempFiles = null;
-            }
-
-            if (temps == null)
-                return;
-
-            foreach (var temp in temps)
-                temp.Dispose();
-        }
-
-        public IHost Register(string name, int? seed = null, bool? verbose = null, int? conc = null)
+        public IHost Register(string name, int? seed = null, bool? verbose = null)
         {
             Contracts.CheckNonEmpty(name, nameof(name));
-            IRandom rand = (seed.HasValue) ? RandomUtils.Create(seed.Value) : RandomUtils.Create(_rand);
-            return RegisterCore(this, name, Master?.FullName, rand, verbose ?? Verbose, conc);
+            Random rand = (seed.HasValue) ? RandomUtils.Create(seed.Value) : RandomUtils.Create(_rand);
+            return RegisterCore(this, name, Master?.FullName, rand, verbose ?? Verbose);
         }
 
         protected abstract IHost RegisterCore(HostEnvironmentBase<TEnv> source, string shortName,
-            string parentFullName, IRandom rand, bool verbose, int? conc);
-
-        public IFileHandle OpenInputFile(string path)
-        {
-
-            if (Master != null)
-                return Master.OpenInputFileCore(this, path);
-            return OpenInputFileCore(this, path);
-        }
+            string parentFullName, Random rand, bool verbose);
 
         public IProgressChannel StartProgressChannel(string name)
         {
@@ -479,106 +402,6 @@ namespace Microsoft.ML.Runtime.Data
             Contracts.AssertNonEmpty(name);
             Contracts.AssertValueOrNull(host);
             return new ProgressReporting.ProgressChannel(this, ProgressTracker, name);
-        }
-
-        /// <summary>
-        /// This "opens" the input file handle. The default implementation assumes the file resides in the
-        /// file system and it does not access the physical file until a read stream is opened on the returned
-        /// file handle.
-        /// </summary>
-        protected virtual IFileHandle OpenInputFileCore(IHostEnvironment env, string path)
-        {
-#pragma warning disable TLC_NoThis // Do not use 'this' keyword for member access
-            this.AssertValue(env);
-            this.CheckNonWhiteSpace(path, nameof(path));
-#pragma warning restore TLC_NoThis // Do not use 'this' keyword for member access
-            if (Master != null)
-                return Master.OpenInputFileCore(env, path);
-            return new SimpleFileHandle(env, path, needsWrite: false, autoDelete: false);
-        }
-
-        public IFileHandle CreateOutputFile(string path)
-        {
-            if (Master != null)
-                return Master.CreateOutputFileCore(this, path);
-            return CreateOutputFileCore(this, path);
-        }
-
-        /// <summary>
-        /// This "creates" the output file handle. The default implementation assumes the file resides in the
-        /// file system and it does not create the physical file until a write stream is opened on the returned
-        /// file handle.
-        /// </summary>
-        protected virtual IFileHandle CreateOutputFileCore(IHostEnvironment env, string path)
-        {
-#pragma warning disable TLC_NoThis // Do not use 'this' keyword for member access
-            this.AssertValue(env);
-            this.CheckNonWhiteSpace(path, nameof(path));
-#pragma warning restore TLC_NoThis // Do not use 'this' keyword for member access
-            if (Master != null)
-                return Master.CreateOutputFileCore(env, path);
-            return new SimpleFileHandle(env, path, needsWrite: true, autoDelete: false);
-        }
-
-        public IFileHandle CreateTempFile(string suffix = null, string prefix = null)
-        {
-            if (Master != null)
-                return Master.CreateAndRegisterTempFile(this);
-            return CreateAndRegisterTempFile(this);
-        }
-
-        /// <summary>
-        /// This calls CreateTempFileCore and handles registering the temp file for cleanup when the environment is disposed.
-        /// </summary>
-        protected IFileHandle CreateAndRegisterTempFile(IHostEnvironment env, string suffix = null, string prefix = null)
-        {
-#pragma warning disable TLC_NoThis // Do not use 'this' keyword for member access
-            this.AssertValue(env);
-#pragma warning restore TLC_NoThis // Do not use 'this' keyword for member access
-
-            if (Master != null)
-                return Master.CreateAndRegisterTempFile(env, suffix, prefix);
-
-            var file = CreateTempFileCore(env, suffix, prefix);
-
-            lock (_tempLock)
-            {
-                if (_tempFiles == null)
-                {
-                    file.Dispose();
-                    throw env.Except("This environment has been disposed, so can't allocate new temp files");
-                }
-                _tempFiles.Add(file);
-            }
-
-            return file;
-        }
-
-        protected virtual IFileHandle CreateTempFileCore(IHostEnvironment env, string suffix = null, string prefix = null)
-        {
-#pragma warning disable TLC_NoThis // Do not use 'this' keyword for member access
-            this.CheckParam(!HasBadFileCharacters(suffix), nameof(suffix));
-            this.CheckParam(!HasBadFileCharacters(prefix), nameof(prefix));
-#pragma warning restore TLC_NoThis // Do not use 'this' keyword for member access
-
-            Guid guid = Guid.NewGuid();
-            string path = Path.GetFullPath(Path.Combine(Path.GetTempPath(), prefix + guid.ToString() + suffix));
-            return new SimpleFileHandle(env, path, needsWrite: true, autoDelete: true);
-        }
-
-        /// <summary>
-        /// Returns true if the given string is non-null and contains invalid file name characters.
-        /// </summary>
-        protected virtual bool HasBadFileCharacters(string str = null)
-        {
-            if (string.IsNullOrEmpty(str))
-                return false;
-
-            var chars = Path.GetInvalidFileNameChars();
-            if (str.IndexOfAny(chars) >= 0)
-                return true;
-
-            return false;
         }
 
         private void DispatchMessageCore<TMessage>(

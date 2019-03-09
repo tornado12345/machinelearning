@@ -5,13 +5,15 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Microsoft.ML.Runtime.Internal.Utilities;
+using Microsoft.Data.DataView;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.Data
+namespace Microsoft.ML.Data
 {
-    public abstract partial class EvaluatorBase<TAgg>
+    internal abstract partial class EvaluatorBase<TAgg>
     {
-        protected abstract class AucAggregatorBase
+        internal abstract class AucAggregatorBase
         {
             protected Single Score;
             protected Single Label;
@@ -30,7 +32,7 @@ namespace Microsoft.ML.Runtime.Data
             public abstract Double ComputeWeightedAuc(out Double unweighted);
         }
 
-        protected abstract class AucAggregatorBase<T> : AucAggregatorBase
+        internal abstract class AucAggregatorBase<T> : AucAggregatorBase
         {
             private readonly ReservoirSamplerWithoutReplacement<T> _posReservoir;
             private readonly ReservoirSamplerWithoutReplacement<T> _negReservoir;
@@ -41,7 +43,7 @@ namespace Microsoft.ML.Runtime.Data
             protected IEnumerable<T> PosSample;
             protected IEnumerable<T> NegSample;
 
-            protected AucAggregatorBase(IRandom rand, int reservoirSize)
+            protected AucAggregatorBase(Random rand, int reservoirSize)
             {
                 Contracts.Assert(reservoirSize >= -1);
 
@@ -111,20 +113,22 @@ namespace Microsoft.ML.Runtime.Data
                 }
 
                 Contracts.Check(PosSample != null && NegSample != null, "Must call Finish() before computing AUC");
-                return ComputWeightedAucCore(out unweighted);
+                Contracts.CheckParam(PosSample.Any(), nameof(PosSample), "AUC is not definied when there is no positive class in the data");
+                Contracts.CheckParam(NegSample.Any(), nameof(NegSample), "AUC is not definied when there is no negative class in the data");
+                return ComputeWeightedAucCore(out unweighted);
             }
 
-            protected abstract Double ComputWeightedAucCore(out double unweighted);
+            protected abstract Double ComputeWeightedAucCore(out double unweighted);
         }
 
-        protected sealed class UnweightedAucAggregator : AucAggregatorBase<Single>
+        internal sealed class UnweightedAucAggregator : AucAggregatorBase<Single>
         {
-            public UnweightedAucAggregator(IRandom rand, int reservoirSize)
+            public UnweightedAucAggregator(Random rand, int reservoirSize)
                 : base(rand, reservoirSize)
             {
             }
 
-            protected override Double ComputWeightedAucCore(out Double unweighted)
+            protected override Double ComputeWeightedAucCore(out Double unweighted)
             {
                 Contracts.AssertValue(PosSample);
                 Contracts.AssertValue(NegSample);
@@ -210,7 +214,7 @@ namespace Microsoft.ML.Runtime.Data
             }
         }
 
-        protected sealed class WeightedAucAggregator : AucAggregatorBase<WeightedAucAggregator.AucInfo>
+        internal sealed class WeightedAucAggregator : AucAggregatorBase<WeightedAucAggregator.AucInfo>
         {
             public struct AucInfo
             {
@@ -220,12 +224,12 @@ namespace Microsoft.ML.Runtime.Data
 
             private Single _weight;
 
-            public WeightedAucAggregator(IRandom rand, int reservoirSize)
+            public WeightedAucAggregator(Random rand, int reservoirSize)
                 : base(rand, reservoirSize)
             {
             }
 
-            protected override Double ComputWeightedAucCore(out Double unweighted)
+            protected override Double ComputeWeightedAucCore(out Double unweighted)
             {
                 Contracts.AssertValue(PosSample);
                 Contracts.AssertValue(NegSample);
@@ -345,7 +349,7 @@ namespace Microsoft.ML.Runtime.Data
             }
         }
 
-        public abstract class AuPrcAggregatorBase
+        internal abstract class AuPrcAggregatorBase
         {
             protected Single Score;
             protected Single Label;
@@ -364,11 +368,11 @@ namespace Microsoft.ML.Runtime.Data
             public abstract Double ComputeWeightedAuPrc(out Double unweighted);
         }
 
-        protected abstract class AuPrcAggregatorBase<T> : AuPrcAggregatorBase
+        private protected abstract class AuPrcAggregatorBase<T> : AuPrcAggregatorBase
         {
             protected readonly ReservoirSamplerWithoutReplacement<T> Reservoir;
 
-            protected AuPrcAggregatorBase(IRandom rand, int reservoirSize)
+            protected AuPrcAggregatorBase(Random rand, int reservoirSize)
             {
                 Contracts.Assert(reservoirSize > 0);
 
@@ -393,7 +397,7 @@ namespace Microsoft.ML.Runtime.Data
             protected abstract Double ComputeWeightedAuPrcCore(out Double unweighted);
         }
 
-        protected sealed class UnweightedAuPrcAggregator : AuPrcAggregatorBase<UnweightedAuPrcAggregator.Info>
+        private protected sealed class UnweightedAuPrcAggregator : AuPrcAggregatorBase<UnweightedAuPrcAggregator.Info>
         {
             public struct Info
             {
@@ -401,14 +405,14 @@ namespace Microsoft.ML.Runtime.Data
                 public Single Label;
             }
 
-            public UnweightedAuPrcAggregator(IRandom rand, int reservoirSize)
+            public UnweightedAuPrcAggregator(Random rand, int reservoirSize)
                 : base(rand, reservoirSize)
             {
             }
 
             /// <summary>
             /// Compute the AUPRC using the "lower trapesoid" estimator, as described in the paper
-            /// <see href="http://www.ecmlpkdd2013.org/wp-content/uploads/2013/07/aucpr_2013ecml_corrected.pdf"/>.
+            /// <a href="https://www.ecmlpkdd2013.org/wp-content/uploads/2013/07/aucpr_2013ecml_corrected.pdf">https://www.ecmlpkdd2013.org/wp-content/uploads/2013/07/aucpr_2013ecml_corrected.pdf</a>.
             /// </summary>
             protected override Double ComputeWeightedAuPrcCore(out Double unweighted)
             {
@@ -466,7 +470,7 @@ namespace Microsoft.ML.Runtime.Data
             }
         }
 
-        protected sealed class WeightedAuPrcAggregator : AuPrcAggregatorBase<WeightedAuPrcAggregator.Info>
+        private protected sealed class WeightedAuPrcAggregator : AuPrcAggregatorBase<WeightedAuPrcAggregator.Info>
         {
             public struct Info
             {
@@ -475,14 +479,14 @@ namespace Microsoft.ML.Runtime.Data
                 public Single Weight;
             }
 
-            public WeightedAuPrcAggregator(IRandom rand, int reservoirSize)
+            public WeightedAuPrcAggregator(Random rand, int reservoirSize)
                 : base(rand, reservoirSize)
             {
             }
 
             /// <summary>
             /// Compute the AUPRC using the "lower trapesoid" estimator, as described in the paper
-            /// <see href="http://www.ecmlpkdd2013.org/wp-content/uploads/2013/07/aucpr_2013ecml_corrected.pdf"/>.
+            /// <a href="https://www.ecmlpkdd2013.org/wp-content/uploads/2013/07/aucpr_2013ecml_corrected.pdf">https://www.ecmlpkdd2013.org/wp-content/uploads/2013/07/aucpr_2013ecml_corrected.pdf</a>.
             /// </summary>
             protected override Double ComputeWeightedAuPrcCore(out Double unweighted)
             {

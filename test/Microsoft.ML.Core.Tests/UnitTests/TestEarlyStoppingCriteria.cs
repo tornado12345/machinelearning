@@ -2,41 +2,33 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Float = System.Single;
-
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Microsoft.ML.Runtime;
-using Microsoft.ML.Runtime.CommandLine;
-using Microsoft.ML.Runtime.Data;
-using Microsoft.ML.Runtime.Internal.Internallearn;
+using Microsoft.ML.TestFramework;
+using Microsoft.ML.Trainers.FastTree;
 using Xunit;
 
-namespace Microsoft.ML.Runtime.RunTests
+namespace Microsoft.ML.RunTests
 {
-    
     public sealed class TestEarlyStoppingCriteria
     {
-        private IEarlyStoppingCriterion CreateEarlyStoppingCriterion(string name, string args, bool lowerIsBetter)
+        private EarlyStoppingRuleBase CreateEarlyStoppingCriterion(string name, string args, bool lowerIsBetter)
         {
-            var sub = new SubComponent<IEarlyStoppingCriterion, SignatureEarlyStoppingCriterion>(name, args);
-            return sub.CreateInstance(new TlcEnvironment(), lowerIsBetter);
+            var env = new MLContext()
+                .AddStandardComponents();
+            var sub = new SubComponent<EarlyStoppingRuleBase, SignatureEarlyStoppingCriterion>(name, args);
+            return sub.CreateInstance(env, lowerIsBetter);
         }
 
         [Fact]
         public void TolerantEarlyStoppingCriterionTest()
         {
-            IEarlyStoppingCriterion cr = CreateEarlyStoppingCriterion("tr", "th=0.01", false);
+            EarlyStoppingRuleBase cr = CreateEarlyStoppingCriterion("tr", "th=0.01", false);
 
             bool isBestCandidate;
             bool shouldStop;
 
             for (int i=0; i<100; i++)
             {
-                Float score = 0.001f * i;
+                float score = 0.001f * i;
                 shouldStop = cr.CheckScore(score, 0, out isBestCandidate);
                 Assert.True(isBestCandidate);
                 Assert.False(shouldStop);
@@ -54,14 +46,14 @@ namespace Microsoft.ML.Runtime.RunTests
         [Fact]
         public void GLEarlyStoppingCriterionTest()
         {
-            IEarlyStoppingCriterion cr = CreateEarlyStoppingCriterion("gl", "th=0.01", false);
+            EarlyStoppingRuleBase cr = CreateEarlyStoppingCriterion("gl", "th=0.01", false);
 
             bool isBestCandidate;
             bool shouldStop;
 
             for (int i = 0; i < 100; i++)
             {
-                Float score = 0.001f * i;
+                float score = 0.001f * i;
                 shouldStop = cr.CheckScore(score, 0, out isBestCandidate);
                 Assert.True(isBestCandidate);
                Assert.False(shouldStop);
@@ -79,14 +71,14 @@ namespace Microsoft.ML.Runtime.RunTests
         [Fact]
         public void LPEarlyStoppingCriterionTest()
         {
-            IEarlyStoppingCriterion cr = CreateEarlyStoppingCriterion("lp", "th=0.01 w=5", false);
+            EarlyStoppingRuleBase cr = CreateEarlyStoppingCriterion("lp", "th=0.01 w=5", false);
 
             bool isBestCandidate;
             bool shouldStop;
 
             for (int i = 0; i < 100; i++)
             {
-                Float score = 0.001f * i;
+                float score = 0.001f * i;
                 shouldStop = cr.CheckScore(score, score, out isBestCandidate);
                 Assert.True(isBestCandidate);
                Assert.False(shouldStop);
@@ -115,14 +107,14 @@ namespace Microsoft.ML.Runtime.RunTests
         [Fact]
         public void PQEarlyStoppingCriterionTest()
         {
-            IEarlyStoppingCriterion cr = CreateEarlyStoppingCriterion("pq", "th=0.01 w=5", false);
+            EarlyStoppingRuleBase cr = CreateEarlyStoppingCriterion("pq", "th=0.01 w=5", false);
 
             bool isBestCandidate;
             bool shouldStop;
 
             for (int i = 0; i < 100; i++)
             {
-                Float score = 0.001f * i;
+                float score = 0.001f * i;
                 shouldStop = cr.CheckScore(score, score, out isBestCandidate);
                 Assert.True(isBestCandidate);
                Assert.False(shouldStop);
@@ -152,14 +144,14 @@ namespace Microsoft.ML.Runtime.RunTests
         public void UPEarlyStoppingCriterionTest()
         {
             const int windowSize = 8;
-            IEarlyStoppingCriterion cr = CreateEarlyStoppingCriterion("up", "w=8", false);
+            EarlyStoppingRuleBase cr = CreateEarlyStoppingCriterion("up", "w=8", false);
 
             bool isBestCandidate;
             bool shouldStop;
 
             for (int i = 0; i < 100; i++)
             {
-                Float score = 0.001f * i;
+                float score = 0.001f * i;
                 shouldStop = cr.CheckScore(score, 0, out isBestCandidate);
                 Assert.True(isBestCandidate);
                Assert.False(shouldStop);
@@ -167,7 +159,7 @@ namespace Microsoft.ML.Runtime.RunTests
 
             for (int i = 0; i < windowSize - 1; i++)
             {
-                Float score = 0.09f - 0.001f * i;
+                float score = 0.09f - 0.001f * i;
                 shouldStop = cr.CheckScore(score, 0, out isBestCandidate);
                Assert.False(isBestCandidate);
                Assert.False(shouldStop);

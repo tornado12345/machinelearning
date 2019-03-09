@@ -6,21 +6,19 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 using System.Threading;
-using System.Threading.Tasks;
+using Microsoft.ML.Data;
 using Microsoft.ML.Runtime;
-using Microsoft.ML.Runtime.Data;
 using Xunit;
 
-namespace Microsoft.ML.Runtime.RunTests
+namespace Microsoft.ML.RunTests
 {
     public class TestHosts
     {
         [Fact]
         public void TestCancellation()
         {
-            var env = new TlcEnvironment(seed: 42);
+            IHostEnvironment env = new MLContext(seed: 42);
             for (int z = 0; z < 1000; z++)
             {
                 var mainHost = env.Register("Main");
@@ -72,6 +70,23 @@ namespace Microsoft.ML.Runtime.RunTests
                         children[currentHost].ForEach(x => queue.Enqueue(x));
                 }
             }
+        }
+
+        /// <summary>
+        /// Tests that MLContext's Log event intercepts messages properly.
+        /// </summary>
+        [Fact]
+        public void LogEventProcessesMessages()
+        {
+            var messages = new List<string>();
+
+            var env = new MLContext();
+            env.Log += (sender, e) => messages.Add(e.Message);
+
+            // create a dummy text reader to trigger log messages
+            env.Data.CreateTextLoader(new TextLoader.Options { Columns = new[] { new TextLoader.Column("TestColumn", DataKind.Single, 0) } });
+
+            Assert.True(messages.Count > 0);
         }
     }
 }

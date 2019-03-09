@@ -2,24 +2,27 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-#pragma warning disable 420 // volatile with Interlocked.CompareExchange
-
 using System;
 using System.Collections.Generic;
 using System.IO;
+using Microsoft.Data.DataView;
+using Microsoft.ML;
+using Microsoft.ML.Command;
+using Microsoft.ML.CommandLine;
+using Microsoft.ML.Data;
+using Microsoft.ML.Data.IO;
+using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
-using Microsoft.ML.Runtime.Command;
-using Microsoft.ML.Runtime.CommandLine;
-using Microsoft.ML.Runtime.Data;
-using Microsoft.ML.Runtime.Internal.Utilities;
-using Microsoft.ML.Runtime.Model;
 
 [assembly: LoadableClass(ScoreCommand.Summary, typeof(ScoreCommand), typeof(ScoreCommand.Arguments), typeof(SignatureCommand),
     "Score Predictor", "Score")]
 
-namespace Microsoft.ML.Runtime.Data
+namespace Microsoft.ML.Data
 {
-    public interface IDataScorerTransform : IDataTransform, ITransformTemplate
+    using TScorerFactory = IComponentFactory<IDataView, ISchemaBoundMapper, RoleMappedSchema, IDataScorerTransform>;
+
+    [BestFriend]
+    internal interface IDataScorerTransform : IDataTransform, ITransformTemplate
     {
     }
 
@@ -31,11 +34,13 @@ namespace Microsoft.ML.Runtime.Data
     /// <param name="trainSchema">This parameter holds a snapshot of the role mapped training schema as
     /// it existed at the point when <paramref name="mapper"/> was trained, or <c>null</c> if it not
     /// available for some reason</param>
-    public delegate void SignatureDataScorer(IDataView data, ISchemaBoundMapper mapper, RoleMappedSchema trainSchema);
+    [BestFriend]
+    internal delegate void SignatureDataScorer(IDataView data, ISchemaBoundMapper mapper, RoleMappedSchema trainSchema);
 
-    public delegate void SignatureBindableMapper(IPredictor predictor);
+    [BestFriend]
+    internal delegate void SignatureBindableMapper(IPredictor predictor);
 
-    public sealed class ScoreCommand : DataCommand.ImplBase<ScoreCommand.Arguments>
+    internal sealed class ScoreCommand : DataCommand.ImplBase<ScoreCommand.Arguments>
     {
         public sealed class Arguments : DataCommand.ArgumentsBase
         {
@@ -46,15 +51,15 @@ namespace Microsoft.ML.Runtime.Data
             public string GroupColumn = DefaultColumnNames.GroupId;
 
             [Argument(ArgumentType.Multiple,
-                HelpText = "Input columns: Columns with custom kinds declared through key assignments, e.g., col[Kind]=Name to assign column named 'Name' kind 'Kind'",
-                ShortName = "col", SortOrder = 10)]
-            public KeyValuePair<string, string>[] CustomColumn;
+                HelpText = "Input columns: Columns with custom kinds declared through key assignments, for example, col[Kind]=Name to assign column named 'Name' kind 'Kind'",
+                Name = "CustomColumn", ShortName = "col", SortOrder = 10)]
+            public KeyValuePair<string, string>[] CustomColumns;
 
-            [Argument(ArgumentType.Multiple, HelpText = "Scorer to use")]
-            public SubComponent<IDataScorerTransform, SignatureDataScorer> Scorer;
+            [Argument(ArgumentType.Multiple, HelpText = "Scorer to use", SignatureType = typeof(SignatureDataScorer))]
+            public TScorerFactory Scorer;
 
-            [Argument(ArgumentType.Multiple, HelpText = "The data saver to use")]
-            public SubComponent<IDataSaver, SignatureDataSaver> Saver;
+            [Argument(ArgumentType.Multiple, HelpText = "The data saver to use", SignatureType = typeof(SignatureDataSaver))]
+            public IComponentFactory<IDataSaver> Saver;
 
             [Argument(ArgumentType.LastOccurenceWins, HelpText = "File to save the data", ShortName = "dout")]
             public string OutputDataFile;
@@ -62,14 +67,15 @@ namespace Microsoft.ML.Runtime.Data
             [Argument(ArgumentType.AtMostOnce, HelpText = "Whether to include hidden columns", ShortName = "keep")]
             public bool KeepHidden;
 
-            [Argument(ArgumentType.Multiple, HelpText = "Post processing transform", ShortName = "pxf")]
-            public KeyValuePair<string, SubComponent<IDataTransform, SignatureDataTransform>>[] PostTransform;
+            [Argument(ArgumentType.Multiple, HelpText = "Post processing transform", ShortName = "pxf", SignatureType = typeof(SignatureDataTransform))]
+            public KeyValuePair<string, IComponentFactory<IDataView, IDataTransform>>[] PostTransform;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Whether to output all columns or just scores", ShortName = "all")]
             public bool? OutputAllColumns;
 
-            [Argument(ArgumentType.Multiple, HelpText = "What columns to output beyond score columns, if outputAllColumns=-.", ShortName = "outCol")]
-            public string[] OutputColumn;
+            [Argument(ArgumentType.Multiple, HelpText = "What columns to output beyond score columns, if outputAllColumns=-.",
+                Name = "OutputColumn", ShortName = "outCol")]
+            public string[] OutputColumns;
         }
 
         internal const string Summary = "Scores a data file.";
@@ -77,9 +83,9 @@ namespace Microsoft.ML.Runtime.Data
         public ScoreCommand(IHostEnvironment env, Arguments args)
             : base(env, args, nameof(ScoreCommand))
         {
-            Host.CheckUserArg(!string.IsNullOrWhiteSpace(Args.InputModelFile), nameof(Args.InputModelFile), "The input model file is required.");
-            Host.CheckUserArg(!string.IsNullOrWhiteSpace(Args.OutputDataFile), nameof(Args.OutputDataFile), "The output data file is required.");
-            Utils.CheckOptionalUserDirectory(Args.OutputDataFile, nameof(Args.OutputDataFile));
+            Host.CheckUserArg(!string.IsNullOrWhiteSpace(ImplOptions.InputModelFile), nameof(ImplOptions.InputModelFile), "The input model file is required.");
+            Host.CheckUserArg(!string.IsNullOrWhiteSpace(ImplOptions.OutputDataFile), nameof(ImplOptions.OutputDataFile), "The output data file is required.");
+            Utils.CheckOptionalUserDirectory(ImplOptions.OutputDataFile, nameof(ImplOptions.OutputDataFile));
         }
 
         public override void Run()
@@ -87,7 +93,6 @@ namespace Microsoft.ML.Runtime.Data
             using (var ch = Host.Start("Score"))
             {
                 RunCore(ch);
-                ch.Done();
             }
         }
 
@@ -97,100 +102,106 @@ namespace Microsoft.ML.Runtime.Data
 
             ch.Trace("Creating loader");
 
-            IPredictor predictor;
-            IDataLoader loader;
-            RoleMappedSchema trainSchema;
-            LoadModelObjects(ch, true, out predictor, true, out trainSchema, out loader);
+            LoadModelObjects(ch, true, out var predictor, true, out var trainSchema, out var loader);
             ch.AssertValue(predictor);
             ch.AssertValueOrNull(trainSchema);
             ch.AssertValue(loader);
 
             ch.Trace("Creating pipeline");
-            var scorer = Args.Scorer;
-            var bindable = ScoreUtils.GetSchemaBindableMapper(Host, predictor, scorer);
+            var scorer = ImplOptions.Scorer;
+            ch.Assert(scorer == null || scorer is ICommandLineComponentFactory, "ScoreCommand should only be used from the command line.");
+            var bindable = ScoreUtils.GetSchemaBindableMapper(Host, predictor, scorerFactorySettings: scorer as ICommandLineComponentFactory);
             ch.AssertValue(bindable);
 
             // REVIEW: We probably ought to prefer role mappings from the training schema.
             string feat = TrainUtils.MatchNameOrDefaultOrNull(ch, loader.Schema,
-                nameof(Args.FeatureColumn), Args.FeatureColumn, DefaultColumnNames.Features);
+                nameof(ImplOptions.FeatureColumn), ImplOptions.FeatureColumn, DefaultColumnNames.Features);
             string group = TrainUtils.MatchNameOrDefaultOrNull(ch, loader.Schema,
-                nameof(Args.GroupColumn), Args.GroupColumn, DefaultColumnNames.GroupId);
-            var customCols = TrainUtils.CheckAndGenerateCustomColumns(ch, Args.CustomColumn);
-            var schema = TrainUtils.CreateRoleMappedSchemaOpt(loader.Schema, feat, group, customCols);
+                nameof(ImplOptions.GroupColumn), ImplOptions.GroupColumn, DefaultColumnNames.GroupId);
+            var customCols = TrainUtils.CheckAndGenerateCustomColumns(ch, ImplOptions.CustomColumns);
+            var schema = new RoleMappedSchema(loader.Schema, label: null, feature: feat, group: group, custom: customCols, opt: true);
             var mapper = bindable.Bind(Host, schema);
 
-            if (!scorer.IsGood())
-                scorer = ScoreUtils.GetScorerComponent(mapper);
+            if (scorer == null)
+                scorer = ScoreUtils.GetScorerComponent(Host, mapper);
 
-            loader = CompositeDataLoader.ApplyTransform(Host, loader, "Scorer", scorer.ToString(),
-                (env, view) => scorer.CreateInstance(env, view, mapper, trainSchema));
+            loader = LegacyCompositeDataLoader.ApplyTransform(Host, loader, "Scorer", scorer.ToString(),
+                (env, view) => scorer.CreateComponent(env, view, mapper, trainSchema));
 
-            loader = CompositeDataLoader.Create(Host, loader, Args.PostTransform);
+            loader = LegacyCompositeDataLoader.Create(Host, loader, ImplOptions.PostTransform);
 
-            if (!string.IsNullOrWhiteSpace(Args.OutputModelFile))
+            if (!string.IsNullOrWhiteSpace(ImplOptions.OutputModelFile))
             {
                 ch.Trace("Saving the data pipe");
-                SaveLoader(loader, Args.OutputModelFile);
+                SaveLoader(loader, ImplOptions.OutputModelFile);
             }
 
             ch.Trace("Creating saver");
-            var saver = Args.Saver;
-            if (!saver.IsGood())
+            IDataSaver writer;
+            if (ImplOptions.Saver == null)
             {
-                var ext = Path.GetExtension(Args.OutputDataFile);
+                var ext = Path.GetExtension(ImplOptions.OutputDataFile);
                 var isText = ext == ".txt" || ext == ".tlc";
-                saver = new SubComponent<IDataSaver, SignatureDataSaver>(isText ? "TextSaver" : "BinarySaver");
+                if (isText)
+                {
+                    writer = new TextSaver(Host, new TextSaver.Arguments());
+                }
+                else
+                {
+                    writer = new BinarySaver(Host, new BinarySaver.Arguments());
+                }
             }
-            var writer = saver.CreateInstance(Host);
+            else
+            {
+                writer = ImplOptions.Saver.CreateComponent(Host);
+            }
             ch.Assert(writer != null);
             var outputIsBinary = writer is BinaryWriter;
 
             bool outputAllColumns =
-                Args.OutputAllColumns == true
-                || (Args.OutputAllColumns == null && Utils.Size(Args.OutputColumn) == 0 && outputIsBinary);
+                ImplOptions.OutputAllColumns == true
+                || (ImplOptions.OutputAllColumns == null && Utils.Size(ImplOptions.OutputColumns) == 0 && outputIsBinary);
 
             bool outputNamesAndLabels =
-                Args.OutputAllColumns == true || Utils.Size(Args.OutputColumn) == 0;
+                ImplOptions.OutputAllColumns == true || Utils.Size(ImplOptions.OutputColumns) == 0;
 
-            if (Args.OutputAllColumns == true && Utils.Size(Args.OutputColumn) != 0)
-                ch.Warning("outputAllColumns=+ always writes all columns irrespective of outputColumn specified.");
+            if (ImplOptions.OutputAllColumns == true && Utils.Size(ImplOptions.OutputColumns) != 0)
+                ch.Warning(nameof(ImplOptions.OutputAllColumns) + "=+ always writes all columns irrespective of " + nameof(ImplOptions.OutputColumns) + " specified.");
 
-            if (!outputAllColumns && Utils.Size(Args.OutputColumn) != 0)
+            if (!outputAllColumns && Utils.Size(ImplOptions.OutputColumns) != 0)
             {
-                foreach (var outCol in Args.OutputColumn)
+                foreach (var outCol in ImplOptions.OutputColumns)
                 {
-                    int dummyColIndex;
-                    if (!loader.Schema.TryGetColumnIndex(outCol, out dummyColIndex))
-                        throw ch.ExceptUserArg(nameof(Arguments.OutputColumn), "Column '{0}' not found.", outCol);
+                    if (!loader.Schema.TryGetColumnIndex(outCol, out int dummyColIndex))
+                        throw ch.ExceptUserArg(nameof(Arguments.OutputColumns), "Column '{0}' not found.", outCol);
                 }
             }
 
-            int colMax;
             uint maxScoreId = 0;
             if (!outputAllColumns)
-                maxScoreId = loader.Schema.GetMaxMetadataKind(out colMax, MetadataUtils.Kinds.ScoreColumnSetId);
+                maxScoreId = loader.Schema.GetMaxAnnotationKind(out int colMax, AnnotationUtils.Kinds.ScoreColumnSetId);
             ch.Assert(outputAllColumns || maxScoreId > 0); // score set IDs are one-based
             var cols = new List<int>();
-            for (int i = 0; i < loader.Schema.ColumnCount; i++)
+            for (int i = 0; i < loader.Schema.Count; i++)
             {
-                if (!Args.KeepHidden && loader.Schema.IsHidden(i))
+                if (!ImplOptions.KeepHidden && loader.Schema[i].IsHidden)
                     continue;
                 if (!(outputAllColumns || ShouldAddColumn(loader.Schema, i, maxScoreId, outputNamesAndLabels)))
                     continue;
-                var type = loader.Schema.GetColumnType(i);
+                var type = loader.Schema[i].Type;
                 if (writer.IsColumnSavable(type))
                     cols.Add(i);
                 else
                 {
                     ch.Warning("The column '{0}' will not be written as it has unsavable column type.",
-                        loader.Schema.GetColumnName(i));
+                        loader.Schema[i].Name);
                 }
             }
 
             ch.Check(cols.Count > 0, "No valid columns to save");
 
             ch.Trace("Scoring and saving data");
-            using (var file = Host.CreateOutputFile(Args.OutputDataFile))
+            using (var file = Host.CreateOutputFile(ImplOptions.OutputDataFile))
             using (var stream = file.CreateWriteStream())
                 writer.SaveData(stream, loader, cols.ToArray());
         }
@@ -199,44 +210,51 @@ namespace Microsoft.ML.Runtime.Data
         /// Whether a column should be added, assuming it's not hidden
         /// (i.e.: this doesn't check for hidden
         /// </summary>
-        private bool ShouldAddColumn(ISchema schema, int i, uint scoreSet, bool outputNamesAndLabels)
+        private bool ShouldAddColumn(DataViewSchema schema, int i, uint scoreSet, bool outputNamesAndLabels)
         {
             uint scoreSetId = 0;
-            if (schema.TryGetMetadata(MetadataUtils.ScoreColumnSetIdType.AsPrimitive, MetadataUtils.Kinds.ScoreColumnSetId, i, ref scoreSetId)
+            if (schema.TryGetAnnotation(AnnotationUtils.ScoreColumnSetIdType, AnnotationUtils.Kinds.ScoreColumnSetId, i, ref scoreSetId)
                 && scoreSetId == scoreSet)
             {
                 return true;
             }
             if (outputNamesAndLabels)
             {
-                switch (schema.GetColumnName(i))
+                switch (schema[i].Name)
                 {
-                case "Label":
-                case "Name":
-                case "Names":
-                    return true;
-                default:
-                    break;
+                    case "Label":
+                    case "Name":
+                    case "Names":
+                        return true;
+                    default:
+                        break;
                 }
             }
-            if (Args.OutputColumn != null && Array.FindIndex(Args.OutputColumn, schema.GetColumnName(i).Equals) >= 0)
+            if (ImplOptions.OutputColumns != null && Array.FindIndex(ImplOptions.OutputColumns, schema[i].Name.Equals) >= 0)
                 return true;
             return false;
         }
     }
 
-    public static class ScoreUtils
+    [BestFriend]
+    internal static class ScoreUtils
     {
         public static IDataScorerTransform GetScorer(IPredictor predictor, RoleMappedData data, IHostEnvironment env, RoleMappedSchema trainSchema)
         {
-            ISchemaBoundMapper mapper;
-            var sc = GetScorerComponentAndMapper(predictor, null, data.Schema, env, out mapper);
-            return sc.CreateInstance(env, data.Data, mapper, trainSchema);
+            var sc = GetScorerComponentAndMapper(predictor, null, data.Schema, env, null, out var mapper);
+            return sc.CreateComponent(env, data.Data, mapper, trainSchema);
         }
 
-        public static IDataScorerTransform GetScorer(SubComponent<IDataScorerTransform, SignatureDataScorer> scorer,
-            IPredictor predictor, IDataView input, string featureColName, string groupColName,
-            IEnumerable<KeyValuePair<RoleMappedSchema.ColumnRole, string>> customColumns, IHostEnvironment env, RoleMappedSchema trainSchema)
+        public static IDataScorerTransform GetScorer(
+            TScorerFactory scorer,
+            IPredictor predictor,
+            IDataView input,
+            string featureColName,
+            string groupColName,
+            IEnumerable<KeyValuePair<RoleMappedSchema.ColumnRole, string>> customColumns,
+            IHostEnvironment env,
+            RoleMappedSchema trainSchema,
+            IComponentFactory<IPredictor, ISchemaBindableMapper> mapperFactory = null)
         {
             Contracts.CheckValue(env, nameof(env));
             env.CheckValueOrNull(scorer);
@@ -247,27 +265,30 @@ namespace Microsoft.ML.Runtime.Data
             env.CheckValueOrNull(customColumns);
             env.CheckValueOrNull(trainSchema);
 
-            var schema = TrainUtils.CreateRoleMappedSchemaOpt(input.Schema, featureColName, groupColName, customColumns);
-            ISchemaBoundMapper mapper;
-            var sc = GetScorerComponentAndMapper(predictor, scorer, schema, env, out mapper);
-            return sc.CreateInstance(env, input, mapper, trainSchema);
+            var schema = new RoleMappedSchema(input.Schema, label: null, feature: featureColName, group: groupColName, custom: customColumns, opt: true);
+            var sc = GetScorerComponentAndMapper(predictor, scorer, schema, env, mapperFactory, out var mapper);
+            return sc.CreateComponent(env, input, mapper, trainSchema);
         }
 
         /// <summary>
-        /// Determines the scorer subcomponent (if the given one is null or empty), and creates the schema bound mapper.
+        /// Determines the scorer component factory (if the given one is null or empty), and creates the schema bound mapper.
         /// </summary>
-        private static SubComponent<IDataScorerTransform, SignatureDataScorer> GetScorerComponentAndMapper(
-            IPredictor predictor, SubComponent<IDataScorerTransform, SignatureDataScorer> scorer,
-            RoleMappedSchema schema, IHostEnvironment env, out ISchemaBoundMapper mapper)
+        private static TScorerFactory GetScorerComponentAndMapper(
+            IPredictor predictor,
+            TScorerFactory scorerFactory,
+            RoleMappedSchema schema,
+            IHostEnvironment env,
+            IComponentFactory<IPredictor, ISchemaBindableMapper> mapperFactory,
+            out ISchemaBoundMapper mapper)
         {
             Contracts.AssertValue(env);
 
-            var bindable = GetSchemaBindableMapper(env, predictor, scorer);
+            var bindable = GetSchemaBindableMapper(env, predictor, mapperFactory, scorerFactory as ICommandLineComponentFactory);
             env.AssertValue(bindable);
             mapper = bindable.Bind(env, schema);
-            if (scorer.IsGood())
-                return scorer;
-            return GetScorerComponent(mapper);
+            if (scorerFactory != null)
+                return scorerFactory;
+            return GetScorerComponent(env, mapper);
         }
 
         /// <summary>
@@ -275,46 +296,87 @@ namespace Microsoft.ML.Runtime.Data
         /// metadata on the first column of the mapper. If that text is found and maps to a scorer loadable class,
         /// that component is used. Otherwise, the GenericScorer is used.
         /// </summary>
-        public static SubComponent<IDataScorerTransform, SignatureDataScorer> GetScorerComponent(ISchemaBoundMapper mapper)
+        /// <param name="environment">The host environment.</param>.
+        /// <param name="mapper">The schema bound mapper to get the default scorer.</param>.
+        /// <param name="suffix">An optional suffix to append to the default column names.</param>
+        public static TScorerFactory GetScorerComponent(
+            IHostEnvironment environment,
+            ISchemaBoundMapper mapper,
+            string suffix = null)
         {
+            Contracts.CheckValue(environment, nameof(environment));
             Contracts.AssertValue(mapper);
 
-            string loadName = null;
-            DvText scoreKind = default(DvText);
-            if (mapper.OutputSchema.ColumnCount > 0 &&
-                mapper.OutputSchema.TryGetMetadata(TextType.Instance, MetadataUtils.Kinds.ScoreColumnKind, 0, ref scoreKind) &&
-                scoreKind.HasChars)
+            ComponentCatalog.LoadableClassInfo info = null;
+            ReadOnlyMemory<char> scoreKind = default;
+            if (mapper.OutputSchema.Count > 0 &&
+                mapper.OutputSchema.TryGetAnnotation(TextDataViewType.Instance, AnnotationUtils.Kinds.ScoreColumnKind, 0, ref scoreKind) &&
+                !scoreKind.IsEmpty)
             {
-                loadName = scoreKind.ToString();
-                var info = ComponentCatalog.GetLoadableClassInfo<SignatureDataScorer>(loadName);
+                var loadName = scoreKind.ToString();
+                info = environment.ComponentCatalog.GetLoadableClassInfo<SignatureDataScorer>(loadName);
                 if (info == null || !typeof(IDataScorerTransform).IsAssignableFrom(info.Type))
-                    loadName = null;
+                    info = null;
             }
-            if (loadName == null)
-                loadName = GenericScorer.LoadName;
-            return new SubComponent<IDataScorerTransform, SignatureDataScorer>(loadName);
+
+            Func<IHostEnvironment, IDataView, ISchemaBoundMapper, RoleMappedSchema, IDataScorerTransform> factoryFunc;
+            if (info == null)
+            {
+                factoryFunc = (env, data, innerMapper, trainSchema) =>
+                    new GenericScorer(
+                        env,
+                        new GenericScorer.Arguments() { Suffix = suffix },
+                        data,
+                        innerMapper,
+                        trainSchema);
+            }
+            else
+            {
+                factoryFunc = (env, data, innerMapper, trainSchema) =>
+                {
+                    object args = info.CreateArguments();
+                    if (args is ScorerArgumentsBase scorerArgs)
+                    {
+                        scorerArgs.Suffix = suffix;
+                    }
+                    return (IDataScorerTransform)info.CreateInstance(
+                        env,
+                        args,
+                        new object[] { data, innerMapper, trainSchema });
+                };
+            }
+
+            return ComponentFactoryUtils.CreateFromFunction(factoryFunc);
         }
 
         /// <summary>
-        /// Given a predictor and an optional scorer SubComponent, produces a compatible ISchemaBindableMapper.
-        /// First, it tries to instantiate the bindable mapper using the <paramref name="scorerSettings"/>
-        /// (this will only succeed if there's a registered BindableMapper creation method with load name equal to the one 
+        /// Given a predictor, an optional mapper factory, and an optional scorer factory settings,
+        /// produces a compatible ISchemaBindableMapper.
+        /// First, it tries to instantiate the bindable mapper using the mapper factory.
+        /// Next, it tries to instantiate the bindable mapper using the <paramref name="scorerFactorySettings"/>
+        /// (this will only succeed if there's a registered BindableMapper creation method with load name equal to the one
         /// of the scorer).
-        /// If the above fails, it checks whether the predictor implements <see cref="ISchemaBindableMapper"/> 
+        /// If the above fails, it checks whether the predictor implements <see cref="ISchemaBindableMapper"/>
         /// directly.
         /// If this also isn't true, it will create a 'matching' standard mapper.
         /// </summary>
-        public static ISchemaBindableMapper GetSchemaBindableMapper(IHostEnvironment env, IPredictor predictor,
-            SubComponent<IDataScorerTransform, SignatureDataScorer> scorerSettings)
+        public static ISchemaBindableMapper GetSchemaBindableMapper(
+            IHostEnvironment env,
+            IPredictor predictor,
+            IComponentFactory<IPredictor, ISchemaBindableMapper> mapperFactory = null,
+            ICommandLineComponentFactory scorerFactorySettings = null)
         {
             Contracts.CheckValue(env, nameof(env));
             env.CheckValue(predictor, nameof(predictor));
-            env.CheckValueOrNull(scorerSettings);
+            env.CheckValueOrNull(mapperFactory);
+            env.CheckValueOrNull(scorerFactorySettings);
 
-            ISchemaBindableMapper bindable;
+            // if the mapperFactory was supplied, use it
+            if (mapperFactory != null)
+                return mapperFactory.CreateComponent(env, predictor);
 
             // See if we can instantiate a mapper using scorer arguments.
-            if (scorerSettings.IsGood() && TryCreateBindableFromScorer(env, predictor, scorerSettings, out bindable))
+            if (scorerFactorySettings != null && TryCreateBindableFromScorer(env, predictor, scorerFactorySettings, out var bindable))
                 return bindable;
 
             // The easy case is that the predictor implements the interface.
@@ -330,15 +392,15 @@ namespace Microsoft.ML.Runtime.Data
         }
 
         private static bool TryCreateBindableFromScorer(IHostEnvironment env, IPredictor predictor,
-            SubComponent<IDataScorerTransform, SignatureDataScorer> scorerSettings, out ISchemaBindableMapper bindable)
+            ICommandLineComponentFactory scorerSettings, out ISchemaBindableMapper bindable)
         {
             Contracts.AssertValue(env);
             env.AssertValue(predictor);
-            env.Assert(scorerSettings.IsGood());
+            env.AssertValue(scorerSettings);
 
             // Try to find a mapper factory method with the same loadname as the scorer settings.
-            var mapperComponent = new SubComponent<ISchemaBindableMapper, SignatureBindableMapper>(scorerSettings.Kind, scorerSettings.Settings);
-            return ComponentCatalog.TryCreateInstance(env, out bindable, mapperComponent, predictor);
+            return ComponentCatalog.TryCreateInstance<ISchemaBindableMapper, SignatureBindableMapper>(
+                env, out bindable, scorerSettings.Name, scorerSettings.GetSettingsString(), predictor);
         }
     }
 }

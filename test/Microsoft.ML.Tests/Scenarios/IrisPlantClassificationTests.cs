@@ -2,131 +2,115 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Microsoft.ML.Models;
-using Microsoft.ML.Runtime.Api;
+using Microsoft.ML.Data;
+using Microsoft.ML.RunTests;
+using Microsoft.ML.TestFramework;
 using Microsoft.ML.Trainers;
-using Microsoft.ML.Transforms;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Microsoft.ML.Scenarios
 {
-    public partial class ScenariosTests
+    public partial class ScenariosTests : BaseTestClass
     {
         [Fact]
         public void TrainAndPredictIrisModelTest()
         {
-            string dataPath = GetDataPath("iris.txt");
+            var mlContext = new MLContext(seed: 1);
 
-            var pipeline = new LearningPipeline();
+            var reader = mlContext.Data.CreateTextLoader(columns: new[]
+                {
+                    new TextLoader.Column("Label", DataKind.Single, 0),
+                    new TextLoader.Column("SepalLength", DataKind.Single, 1),
+                    new TextLoader.Column("SepalWidth", DataKind.Single, 2),
+                    new TextLoader.Column("PetalLength", DataKind.Single, 3),
+                    new TextLoader.Column("PetalWidth", DataKind.Single, 4)
+                }
+            );
 
-            pipeline.Add(new TextLoader<IrisData>(dataPath, useHeader: true, separator: "tab"));
-            pipeline.Add(new ColumnConcatenator(outputColumn: "Features",
-                "SepalLength", "SepalWidth", "PetalLength", "PetalWidth"));
+            var pipe = mlContext.Transforms.Concatenate("Features", "SepalLength", "SepalWidth", "PetalLength", "PetalWidth")
+                            .Append(mlContext.Transforms.Normalize("Features"))
+                            .AppendCacheCheckpoint(mlContext)
+                            .Append(mlContext.MulticlassClassification.Trainers.StochasticDualCoordinateAscent(
+                                new SdcaMultiClassTrainer.Options { NumberOfThreads = 1 }));
 
-            pipeline.Add(new StochasticDualCoordinateAscentClassifier());
+            // Read training and test data sets
+            string dataPath = GetDataPath(TestDatasets.iris.trainFilename);
+            string testDataPath = dataPath;
+            var trainData = reader.Load(dataPath);
+            var testData = reader.Load(testDataPath);
 
-            PredictionModel<IrisData, IrisPrediction> model = pipeline.Train<IrisData, IrisPrediction>();
+            // Train the pipeline
+            var trainedModel = pipe.Fit(trainData);
 
-            IrisPrediction prediction = model.Predict(new IrisData()
+            // Make predictions
+            var predictFunction = trainedModel.CreatePredictionEngine<IrisData, IrisPrediction>(mlContext);
+            IrisPrediction prediction = predictFunction.Predict(new IrisData()
             {
-                SepalLength = 3.3f,
-                SepalWidth = 1.6f,
-                PetalLength = 0.2f,
-                PetalWidth= 5.1f,
+                SepalLength = 5.1f,
+                SepalWidth = 3.3f,
+                PetalLength = 1.6f,
+                PetalWidth = 0.2f,
             });
 
             Assert.Equal(1, prediction.PredictedLabels[0], 2);
             Assert.Equal(0, prediction.PredictedLabels[1], 2);
             Assert.Equal(0, prediction.PredictedLabels[2], 2);
 
-            prediction = model.Predict(new IrisData()
+            prediction = predictFunction.Predict(new IrisData()
             {
-                SepalLength = 3.1f,
-                SepalWidth = 5.5f,
-                PetalLength = 2.2f,
-                PetalWidth = 6.4f,
+                SepalLength = 6.4f,
+                SepalWidth = 3.1f,
+                PetalLength = 5.5f,
+                PetalWidth = 2.2f,
             });
 
             Assert.Equal(0, prediction.PredictedLabels[0], 2);
             Assert.Equal(0, prediction.PredictedLabels[1], 2);
             Assert.Equal(1, prediction.PredictedLabels[2], 2);
 
-            prediction = model.Predict(new IrisData()
+            prediction = predictFunction.Predict(new IrisData()
             {
-                SepalLength = 3.1f,
-                SepalWidth = 2.5f,
-                PetalLength = 1.2f,
-                PetalWidth = 4.4f,
+                SepalLength = 4.4f,
+                SepalWidth = 3.1f,
+                PetalLength = 2.5f,
+                PetalWidth = 1.2f,
             });
 
             Assert.Equal(.2, prediction.PredictedLabels[0], 1);
             Assert.Equal(.8, prediction.PredictedLabels[1], 1);
             Assert.Equal(0, prediction.PredictedLabels[2], 2);
 
-            // Note: Testing against the same data set as a simple way to test evaluation.
-            // This isn't appropriate in real-world scenarios.
-            string testDataPath = GetDataPath("iris.txt");
-            var testData = new TextLoader<IrisData>(testDataPath, useHeader: true, separator: "tab");
+            // Evaluate the trained pipeline
+            var predicted = trainedModel.Transform(testData);
+            var metrics = mlContext.MulticlassClassification.Evaluate(predicted, topK: 3);
 
-            var evaluator = new ClassificationEvaluator();
-            evaluator.OutputTopKAcc = 3;
-            ClassificationMetrics metrics = evaluator.Evaluate(model, testData);
-
-            Assert.Equal(.98, metrics.AccuracyMacro);
-            Assert.Equal(.98, metrics.AccuracyMicro, 2);
+            Assert.Equal(.98, metrics.MacroAccuracy);
+            Assert.Equal(.98, metrics.MicroAccuracy, 2);
             Assert.Equal(.06, metrics.LogLoss, 2);
-            Assert.InRange(metrics.LogLossReduction, 94, 96);
             Assert.Equal(1, metrics.TopKAccuracy);
 
-            Assert.Equal(3, metrics.PerClassLogLoss.Length);
+            Assert.Equal(3, metrics.PerClassLogLoss.Count);
             Assert.Equal(0, metrics.PerClassLogLoss[0], 1);
             Assert.Equal(.1, metrics.PerClassLogLoss[1], 1);
             Assert.Equal(.1, metrics.PerClassLogLoss[2], 1);
-
-            ConfusionMatrix matrix = metrics.ConfusionMatrix;
-            Assert.Equal(3, matrix.Order);
-            Assert.Equal(3, matrix.ClassNames.Count);
-            Assert.Equal("0", matrix.ClassNames[0]);
-            Assert.Equal("1", matrix.ClassNames[1]);
-            Assert.Equal("2", matrix.ClassNames[2]);
-
-            Assert.Equal(49, matrix[0, 0]);
-            Assert.Equal(49, matrix["0", "0"]);
-            Assert.Equal(0, matrix[0, 1]);
-            Assert.Equal(0, matrix["0", "1"]);
-            Assert.Equal(0, matrix[0, 2]);
-            Assert.Equal(0, matrix["0", "2"]);
-
-            Assert.Equal(0, matrix[1, 0]);
-            Assert.Equal(0, matrix["1", "0"]);
-            Assert.Equal(48, matrix[1, 1]);
-            Assert.Equal(48, matrix["1", "1"]);
-            Assert.Equal(2, matrix[1, 2]);
-            Assert.Equal(2, matrix["1", "2"]);
-
-            Assert.Equal(0, matrix[2, 0]);
-            Assert.Equal(0, matrix["2", "0"]);
-            Assert.Equal(1, matrix[2, 1]);
-            Assert.Equal(1, matrix["2", "1"]);
-            Assert.Equal(49, matrix[2, 2]);
-            Assert.Equal(49, matrix["2", "2"]);
         }
 
         public class IrisData
         {
-            [Column("0")]
+            [LoadColumn(0)]
             public float Label;
 
-            [Column("1")]
+            [LoadColumn(1)]
             public float SepalLength;
 
-            [Column("2")]
+            [LoadColumn(2)]
             public float SepalWidth;
 
-            [Column("3")]
+            [LoadColumn(3)]
             public float PetalLength;
 
-            [Column("4")]
+            [LoadColumn(4)]
             public float PetalWidth;
         }
 
@@ -134,6 +118,10 @@ namespace Microsoft.ML.Scenarios
         {
             [ColumnName("Score")]
             public float[] PredictedLabels;
+        }
+
+        public ScenariosTests(ITestOutputHelper output) : base(output)
+        {
         }
     }
 }

@@ -2,25 +2,24 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Float = System.Single;
-
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using Microsoft.Data.DataView;
+using Microsoft.ML;
+using Microsoft.ML.Data;
+using Microsoft.ML.Data.IO;
+using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Model.OnnxConverter;
+using Microsoft.ML.Model.Pfa;
+using Microsoft.ML.Numeric;
 using Microsoft.ML.Runtime;
-using Microsoft.ML.Runtime.Data;
-using Microsoft.ML.Runtime.Data.IO;
-using Microsoft.ML.Runtime.Internal.Utilities;
-using Microsoft.ML.Runtime.Model;
-using Microsoft.ML.Runtime.Model.Onnx;
-using Microsoft.ML.Runtime.Model.Pfa;
-using Microsoft.ML.Runtime.Numeric;
 using Newtonsoft.Json.Linq;
 
 [assembly: LoadableClass(typeof(MultiClassClassifierScorer),
     typeof(MultiClassClassifierScorer.Arguments), typeof(SignatureDataScorer),
     "Multi-Class Classifier Scorer", "MultiClassClassifierScorer", "MultiClassClassifier",
-    "MultiClass", MetadataUtils.Const.ScoreColumnKind.MultiClassClassification)]
+    "MultiClass", AnnotationUtils.Const.ScoreColumnKind.MultiClassClassification)]
 
 [assembly: LoadableClass(typeof(MultiClassClassifierScorer), null, typeof(SignatureLoadDataTransform),
     "Multi-Class Classifier Scorer", MultiClassClassifierScorer.LoaderSignature)]
@@ -28,9 +27,9 @@ using Newtonsoft.Json.Linq;
 [assembly: LoadableClass(typeof(ISchemaBindableMapper), typeof(MultiClassClassifierScorer.LabelNameBindableMapper), null, typeof(SignatureLoadModel),
     "Multi-Class Label-Name Mapper", MultiClassClassifierScorer.LabelNameBindableMapper.LoaderSignature)]
 
-namespace Microsoft.ML.Runtime.Data
+namespace Microsoft.ML.Data
 {
-    public sealed class MultiClassClassifierScorer : PredictedLabelScorerBase
+    internal sealed class MultiClassClassifierScorer : PredictedLabelScorerBase
     {
         // REVIEW: consider outputting probabilities when multi-class classifiers distinguish
         // between scores and probabilities (using IDistributionPredictor)
@@ -48,7 +47,8 @@ namespace Microsoft.ML.Runtime.Data
                 verWrittenCur: 0x00010003, // ISchemaBindableMapper update
                 verReadableCur: 0x00010003,
                 verWeCanReadBack: 0x00010003,
-                loaderSignature: LoaderSignature);
+                loaderSignature: LoaderSignature,
+                loaderAssemblyName: typeof(MultiClassClassifierScorer).Assembly.FullName);
         }
 
         private const string RegistrationName = "MultiClassClassifierScore";
@@ -73,12 +73,13 @@ namespace Microsoft.ML.Runtime.Data
             // That seems like a bit much...
             private readonly Delegate _getter;
             private readonly IHost _host;
-            private readonly Func<ISchemaBoundMapper, ColumnType, bool> _canWrap;
+            private readonly Func<ISchemaBoundMapper, DataViewType, bool> _canWrap;
+
+            internal ISchemaBindableMapper Bindable => _bindable;
 
             public VectorType Type => _type;
-            public bool CanSavePfa => (_bindable as ICanSavePfa)?.CanSavePfa == true;
-            public bool CanSaveOnnx => (_bindable as ICanSaveOnnx)?.CanSaveOnnx == true;
-            public ISchemaBindableMapper InnerBindable => _bindable;
+            bool ICanSavePfa.CanSavePfa => (_bindable as ICanSavePfa)?.CanSavePfa == true;
+            bool ICanSaveOnnx.CanSaveOnnx(OnnxContext ctx) => (_bindable as ICanSaveOnnx)?.CanSaveOnnx(ctx) == true;
 
             private static VersionInfo GetVersionInfo()
             {
@@ -88,19 +89,20 @@ namespace Microsoft.ML.Runtime.Data
                     verWrittenCur: 0x00010002, // Added metadataKind
                     verReadableCur: 0x00010002,
                     verWeCanReadBack: 0x00010001,
-                    loaderSignature: LoaderSignature);
+                    loaderSignature: LoaderSignature,
+                    loaderAssemblyName: typeof(LabelNameBindableMapper).Assembly.FullName);
             }
 
             private const int VersionAddedMetadataKind = 0x00010002;
 
             private LabelNameBindableMapper(IHostEnvironment env, ISchemaBoundMapper mapper, VectorType type, Delegate getter,
-                string metadataKind, Func<ISchemaBoundMapper, ColumnType, bool> canWrap)
+                string metadataKind, Func<ISchemaBoundMapper, DataViewType, bool> canWrap)
                 : this(env, mapper.Bindable, type, getter, metadataKind, canWrap)
             {
             }
 
             private LabelNameBindableMapper(IHostEnvironment env, ISchemaBindableMapper bindable, VectorType type, Delegate getter,
-                string metadataKind, Func<ISchemaBoundMapper, ColumnType, bool> canWrap)
+                string metadataKind, Func<ISchemaBoundMapper, DataViewType, bool> canWrap)
             {
                 Contracts.AssertValue(env);
                 _host = env.Register(LoaderSignature);
@@ -125,20 +127,15 @@ namespace Microsoft.ML.Runtime.Data
 
                 ctx.LoadModel<ISchemaBindableMapper, SignatureLoadModel>(_host, out _bindable, _innerDir);
                 BinarySaver saver = new BinarySaver(_host, new BinarySaver.Arguments());
-                ColumnType type;
+                DataViewType type;
                 object value;
                 _host.CheckDecode(saver.TryLoadTypeAndValue(ctx.Reader.BaseStream, out type, out value));
-                _host.CheckDecode(type.IsVector);
+                _type = type as VectorType;
+                _host.CheckDecode(_type != null);
                 _host.CheckDecode(value != null);
-                _type = type.AsVector;
                 _getter = Utils.MarshalInvoke(DecodeInit<int>, _type.ItemType.RawType, value);
                 _metadataKind = ctx.Header.ModelVerReadable >= VersionAddedMetadataKind ?
-                    ctx.LoadNonEmptyString() : MetadataUtils.Kinds.SlotNames;
-            }
-
-            public ISchemaBindableMapper Clone(ISchemaBindableMapper inner)
-            {
-                return new LabelNameBindableMapper(_host, inner, _type, _getter, _metadataKind, _canWrap);
+                    ctx.LoadNonEmptyString() : AnnotationUtils.Kinds.SlotNames;
             }
 
             private Delegate DecodeInit<T>(object value)
@@ -149,7 +146,10 @@ namespace Microsoft.ML.Runtime.Data
                 return buffGetter;
             }
 
-            public static ISchemaBindableMapper Create(IHostEnvironment env, ModelLoadContext ctx)
+            /// <summary>
+            /// Method corresponding to <see cref="SignatureLoadModel"/>.
+            /// </summary>
+            private static ISchemaBindableMapper Create(IHostEnvironment env, ModelLoadContext ctx)
             {
                 Contracts.CheckValue(env, nameof(env));
                 var h = env.Register(LoaderSignature);
@@ -164,7 +164,7 @@ namespace Microsoft.ML.Runtime.Data
                 return h.Apply("Loading Model", ch => new LabelNameBindableMapper(h, ctx));
             }
 
-            public void Save(ModelSaveContext ctx)
+            void ICanSaveModel.Save(ModelSaveContext ctx)
             {
                 Contracts.CheckValue(ctx, nameof(ctx));
                 ctx.CheckAtModel();
@@ -194,25 +194,30 @@ namespace Microsoft.ML.Runtime.Data
                     throw _host.Except("We do not know how to serialize label names of type '{0}'", _type.ItemType);
             }
 
-            public void SaveAsPfa(BoundPfaContext ctx, RoleMappedSchema schema, string[] outputNames)
+            internal ISchemaBindableMapper Clone(ISchemaBindableMapper inner)
+            {
+                return new LabelNameBindableMapper(_host, inner, _type, _getter, _metadataKind, _canWrap);
+            }
+
+            void IBindableCanSavePfa.SaveAsPfa(BoundPfaContext ctx, RoleMappedSchema schema, string[] outputNames)
             {
                 Contracts.CheckValue(ctx, nameof(ctx));
                 Contracts.CheckValue(schema, nameof(schema));
-                Contracts.Check(CanSavePfa, "Cannot be saved as PFA");
+                Contracts.Check(((ICanSavePfa)this).CanSavePfa, "Cannot be saved as PFA");
                 Contracts.Assert(_bindable is IBindableCanSavePfa);
                 ((IBindableCanSavePfa)_bindable).SaveAsPfa(ctx, schema, outputNames);
             }
 
-            public bool SaveAsOnnx(OnnxContext ctx, RoleMappedSchema schema, string[] outputNames)
+            bool IBindableCanSaveOnnx.SaveAsOnnx(OnnxContext ctx, RoleMappedSchema schema, string[] outputNames)
             {
                 Contracts.CheckValue(ctx, nameof(ctx));
                 Contracts.CheckValue(schema, nameof(schema));
-                Contracts.Check(CanSaveOnnx, "Cannot be saved as ONNX.");
+                Contracts.Check(((ICanSaveOnnx)this).CanSaveOnnx(ctx), "Cannot be saved as ONNX.");
                 Contracts.Assert(_bindable is IBindableCanSaveOnnx);
                 return ((IBindableCanSaveOnnx)_bindable).SaveAsOnnx(ctx, schema, outputNames);
             }
 
-            public ISchemaBoundMapper Bind(IHostEnvironment env, RoleMappedSchema schema)
+            ISchemaBoundMapper ISchemaBindableMapper.Bind(IHostEnvironment env, RoleMappedSchema schema)
             {
                 var innerBound = _bindable.Bind(env, schema);
                 if (_canWrap != null && !_canWrap(innerBound, _type))
@@ -221,8 +226,8 @@ namespace Microsoft.ML.Runtime.Data
                 return Utils.MarshalInvoke(CreateBound<int>, _type.ItemType.RawType, env, (ISchemaBoundRowMapper)innerBound, _type, _getter, _metadataKind, _canWrap);
             }
 
-            public static ISchemaBoundMapper CreateBound<T>(IHostEnvironment env, ISchemaBoundRowMapper mapper, VectorType type, Delegate getter,
-                string metadataKind, Func<ISchemaBoundMapper, ColumnType, bool> canWrap)
+            internal static ISchemaBoundMapper CreateBound<T>(IHostEnvironment env, ISchemaBoundRowMapper mapper, VectorType type, Delegate getter,
+                string metadataKind, Func<ISchemaBoundMapper, DataViewType, bool> canWrap)
             {
                 Contracts.AssertValue(env);
                 env.AssertValue(mapper);
@@ -243,26 +248,22 @@ namespace Microsoft.ML.Runtime.Data
                 private readonly VectorType _labelNameType;
                 private readonly string _metadataKind;
                 private readonly ValueGetter<VBuffer<T>> _labelNameGetter;
-                private readonly SchemaImpl _outSchema;
                 // Lazily initialized by the property.
                 private LabelNameBindableMapper _bindable;
-                private readonly Func<ISchemaBoundMapper, ColumnType, bool> _canWrap;
+                private readonly Func<ISchemaBoundMapper, DataViewType, bool> _canWrap;
 
-                public ISchema OutputSchema { get { return _outSchema; } }
-
-                public RoleMappedSchema InputSchema { get { return _mapper.InputSchema; } }
+                public RoleMappedSchema InputRoleMappedSchema => _mapper.InputRoleMappedSchema;
+                public DataViewSchema InputSchema => _mapper.InputSchema;
+                public DataViewSchema OutputSchema { get; }
 
                 public ISchemaBindableMapper Bindable
                 {
                     get
                     {
-                        if (_bindable == null)
-                        {
+                        return _bindable ??
                             Interlocked.CompareExchange(ref _bindable,
-                                new LabelNameBindableMapper(_host, _mapper, _labelNameType, _labelNameGetter, _metadataKind, _canWrap), null);
-                        }
-                        Contracts.AssertValue(_bindable);
-                        return _bindable;
+                                new LabelNameBindableMapper(_host, _mapper, _labelNameType, _labelNameGetter, _metadataKind, _canWrap), null) ??
+                            _bindable;
                     }
                 }
 
@@ -270,7 +271,7 @@ namespace Microsoft.ML.Runtime.Data
                 /// This is the constructor called for the initial wrapping.
                 /// </summary>
                 public Bound(IHostEnvironment env, ISchemaBoundRowMapper mapper, VectorType type, ValueGetter<VBuffer<T>> getter,
-                    string metadataKind, Func<ISchemaBoundMapper, ColumnType, bool> canWrap)
+                    string metadataKind, Func<ISchemaBoundMapper, DataViewType, bool> canWrap)
                 {
                     Contracts.CheckValue(env, nameof(env));
                     _host = env.Register(LoaderSignature);
@@ -283,136 +284,91 @@ namespace Microsoft.ML.Runtime.Data
                     _mapper = mapper;
 
                     int scoreIdx;
-                    bool result = mapper.OutputSchema.TryGetColumnIndex(MetadataUtils.Const.ScoreValueKind.Score, out scoreIdx);
+                    bool result = mapper.OutputSchema.TryGetColumnIndex(AnnotationUtils.Const.ScoreValueKind.Score, out scoreIdx);
                     if (!result)
-                        throw env.ExceptParam(nameof(mapper), "Mapper did not have a '{0}' column", MetadataUtils.Const.ScoreValueKind.Score);
+                        throw env.ExceptParam(nameof(mapper), "Mapper did not have a '{0}' column", AnnotationUtils.Const.ScoreValueKind.Score);
 
                     _labelNameType = type;
                     _labelNameGetter = getter;
                     _metadataKind = metadataKind;
-
-                    _outSchema = new SchemaImpl(mapper.OutputSchema, scoreIdx, _labelNameType, _labelNameGetter, _metadataKind);
                     _canWrap = canWrap;
+
+                    OutputSchema = DecorateOutputSchema(mapper.OutputSchema, scoreIdx, _labelNameType, _labelNameGetter, _metadataKind);
                 }
 
-                public Func<int, bool> GetDependencies(Func<int, bool> predicate)
+                /// <summary>
+                /// Append label names to score column as its metadata.
+                /// </summary>
+                private DataViewSchema DecorateOutputSchema(DataViewSchema partialSchema, int scoreColumnIndex, VectorType labelNameType,
+                    ValueGetter<VBuffer<T>> labelNameGetter, string labelNameKind)
                 {
-                    return _mapper.GetDependencies(predicate);
+                    var builder = new DataViewSchema.Builder();
+                    // Sequentially add columns so that the order of them is not changed comparing with the schema in the mapper
+                    // that computes score column.
+                    for (int i = 0; i < partialSchema.Count; ++i)
+                    {
+                        var meta = new DataViewSchema.Annotations.Builder();
+                        if (i == scoreColumnIndex)
+                        {
+                            // Add label names for score column.
+                            meta.Add(partialSchema[i].Annotations, selector: s => s != labelNameKind);
+                            meta.Add(labelNameKind, labelNameType, labelNameGetter);
+                        }
+                        else
+                        {
+                            // Copy all existing metadata because this transform only affects score column.
+                            meta.Add(partialSchema[i].Annotations, selector: s => true);
+                        }
+                        // Instead of appending extra metadata to the existing score column, we create new one because
+                        // metadata is read-only.
+                        builder.AddColumn(partialSchema[i].Name, partialSchema[i].Type, meta.ToAnnotations());
+                    }
+                    return builder.ToSchema();
                 }
 
-                public IEnumerable<KeyValuePair<RoleMappedSchema.ColumnRole, string>> GetInputColumnRoles()
-                {
-                    return _mapper.GetInputColumnRoles();
-                }
+                /// <summary>
+                /// Given a set of columns, return the input columns that are needed to generate those output columns.
+                /// </summary>
+                IEnumerable<DataViewSchema.Column> ISchemaBoundRowMapper.GetDependenciesForNewColumns(IEnumerable<DataViewSchema.Column> dependingColumns)
+                    => _mapper.GetDependenciesForNewColumns(dependingColumns);
 
-                public IRow GetOutputRow(IRow input, Func<int, bool> predicate, out Action disposer)
+                public IEnumerable<KeyValuePair<RoleMappedSchema.ColumnRole, string>> GetInputColumnRoles() => _mapper.GetInputColumnRoles();
+
+                DataViewRow ISchemaBoundRowMapper.GetRow(DataViewRow input, IEnumerable<DataViewSchema.Column> activeColumns)
                 {
-                    var innerRow = _mapper.GetOutputRow(input, predicate, out disposer);
+                    var innerRow = _mapper.GetRow(input, activeColumns);
                     return new RowImpl(innerRow, OutputSchema);
                 }
 
-                private sealed class SchemaImpl : ISchema
+                private sealed class RowImpl : WrappingRow
                 {
-                    private readonly ISchema _parent;
-                    private readonly int _scoreCol;
-                    private readonly VectorType _labelNameType;
-                    private readonly MetadataUtils.MetadataGetter<VBuffer<T>> _labelNameGetter;
-                    private readonly string _metadataKind;
+                    private readonly DataViewSchema _schema;
 
-                    public int ColumnCount { get { return _parent.ColumnCount; } }
-
-                    public SchemaImpl(ISchema parent, int col, VectorType type, ValueGetter<VBuffer<T>> getter, string metadataKind)
-                    {
-                        Contracts.AssertValue(parent);
-                        Contracts.Assert(0 <= col && col < parent.ColumnCount);
-                        Contracts.AssertValue(type);
-                        Contracts.AssertValue(getter);
-                        Contracts.Assert(type.ItemType.RawType == typeof(T));
-                        Contracts.AssertNonEmpty(metadataKind);
-                        Contracts.Assert(parent.GetMetadataTypeOrNull(metadataKind, col) == null);
-
-                        _parent = parent;
-                        _scoreCol = col;
-                        _labelNameType = type;
-                        // We change to this metadata variant of the getter to enable the marshal call to work.
-                        _labelNameGetter = (int c, ref VBuffer<T> val) => getter(ref val);
-                        _metadataKind = metadataKind;
-                    }
-
-                    public bool TryGetColumnIndex(string name, out int col)
-                    {
-                        return _parent.TryGetColumnIndex(name, out col);
-                    }
-
-                    public string GetColumnName(int col)
-                    {
-                        return _parent.GetColumnName(col);
-                    }
-
-                    public ColumnType GetColumnType(int col)
-                    {
-                        return _parent.GetColumnType(col);
-                    }
-
-                    public IEnumerable<KeyValuePair<string, ColumnType>> GetMetadataTypes(int col)
-                    {
-                        var result = _parent.GetMetadataTypes(col);
-                        if (col == _scoreCol)
-                            return result.Prepend(_labelNameType.GetPair(_metadataKind));
-                        return result;
-                    }
-
-                    public ColumnType GetMetadataTypeOrNull(string kind, int col)
-                    {
-                        if (col == _scoreCol && kind == _metadataKind)
-                            return _labelNameType;
-                        return _parent.GetMetadataTypeOrNull(kind, col);
-                    }
-
-                    public void GetMetadata<TValue>(string kind, int col, ref TValue value)
-                    {
-                        if (col == _scoreCol && kind == _metadataKind)
-                        {
-                            _labelNameGetter.Marshal(0, ref value);
-                            return;
-                        }
-                        _parent.GetMetadata(kind, col, ref value);
-                    }
-                }
-
-                private sealed class RowImpl : IRow
-                {
-                    private readonly IRow _row;
-                    private readonly ISchema _schema;
-
-                    public long Batch { get { return _row.Batch; } }
-                    public long Position { get { return _row.Position; } }
                     // The schema is of course the only difference from _row.
-                    public ISchema Schema { get { return _schema; } }
+                    public override DataViewSchema Schema => _schema;
 
-                    public RowImpl(IRow row, ISchema schema)
+                    public RowImpl(DataViewRow row, DataViewSchema schema)
+                        : base(row)
                     {
                         Contracts.AssertValue(row);
                         Contracts.AssertValue(schema);
 
-                        _row = row;
                         _schema = schema;
                     }
 
-                    public bool IsColumnActive(int col)
-                    {
-                        return _row.IsColumnActive(col);
-                    }
+                    /// <summary>
+                    /// Returns whether the given column is active in this row.
+                    /// </summary>
+                    public override bool IsColumnActive(DataViewSchema.Column column) => Input.IsColumnActive(column);
 
-                    public ValueGetter<TValue> GetGetter<TValue>(int col)
-                    {
-                        return _row.GetGetter<TValue>(col);
-                    }
-
-                    public ValueGetter<UInt128> GetIdGetter()
-                    {
-                        return _row.GetIdGetter();
-                    }
+                    /// <summary>
+                    /// Returns a value getter delegate to fetch the value of column with the given columnIndex, from the row.
+                    /// This throws if the column is not active in this row, or if the type
+                    /// <typeparamref name="TValue"/> differs from this column's type.
+                    /// </summary>
+                    /// <typeparam name="TValue"> is the column's content type.</typeparam>
+                    /// <param name="column"> is the output column whose getter should be returned.</param>
+                    public override ValueGetter<TValue> GetGetter<TValue>(DataViewSchema.Column column) => Input.GetGetter<TValue>(column);
                 }
             }
         }
@@ -432,9 +388,9 @@ namespace Microsoft.ML.Runtime.Data
             // them as slot name metadata. But there are a number of conditions for this to actually
             // happen, so we test those here. If these are not
 
-            if (trainSchema == null || trainSchema.Label == null)
+            if (trainSchema?.Label == null)
                 return mapper; // We don't even have a label identified in a training schema.
-            var keyType = trainSchema.Schema.GetMetadataTypeOrNull(MetadataUtils.Kinds.KeyValues, trainSchema.Label.Index);
+            var keyType = trainSchema.Label.Value.Annotations.Schema.GetColumnOrNull(AnnotationUtils.Kinds.KeyValues)?.Type as VectorType;
             if (keyType == null || !CanWrap(mapper, keyType))
                 return mapper;
 
@@ -452,9 +408,9 @@ namespace Microsoft.ML.Runtime.Data
         /// <param name="labelNameType">The type of the label names from the metadata (either
         /// originating from the key value metadata of the training label column, or deserialized
         /// from the model of a bindable mapper)</param>
-        /// <returns>Whether we can call <see cref="LabelNameBindableMapper.CreateBound"/> with
+        /// <returns>Whether we can call <see cref="LabelNameBindableMapper.CreateBound{T}"/> with
         /// this mapper and expect it to succeed</returns>
-        public static bool CanWrap(ISchemaBoundMapper mapper, ColumnType labelNameType)
+        internal static bool CanWrap(ISchemaBoundMapper mapper, DataViewType labelNameType)
         {
             Contracts.AssertValue(mapper);
             Contracts.AssertValue(labelNameType);
@@ -463,19 +419,20 @@ namespace Microsoft.ML.Runtime.Data
             if (rowMapper == null)
                 return false; // We could cover this case, but it is of no practical worth as far as I see, so I decline to do so.
 
-            ISchema outSchema = mapper.OutputSchema;
+            var outSchema = mapper.OutputSchema;
             int scoreIdx;
-            if (!outSchema.TryGetColumnIndex(MetadataUtils.Const.ScoreValueKind.Score, out scoreIdx))
+            var scoreCol = outSchema.GetColumnOrNull(AnnotationUtils.Const.ScoreValueKind.Score);
+            if (!outSchema.TryGetColumnIndex(AnnotationUtils.Const.ScoreValueKind.Score, out scoreIdx))
                 return false; // The mapper doesn't even publish a score column to attach the metadata to.
-            if (outSchema.GetMetadataTypeOrNull(MetadataUtils.Kinds.SlotNames, scoreIdx) != null)
+            if (outSchema[scoreIdx].Annotations.Schema.GetColumnOrNull(AnnotationUtils.Kinds.SlotNames)?.Type != null)
                 return false; // The mapper publishes a score column, and already produces its own slot names.
-            var scoreType = outSchema.GetColumnType(scoreIdx);
+            var scoreType = outSchema[scoreIdx].Type;
 
             // Check that the type is vector, and is of compatible size with the score output.
-            return labelNameType.IsVector && labelNameType.VectorSize == scoreType.VectorSize;
+            return labelNameType is VectorType vectorType && vectorType.Size == scoreType.GetVectorSize();
         }
 
-        public static ISchemaBoundMapper WrapCore<T>(IHostEnvironment env, ISchemaBoundMapper mapper, RoleMappedSchema trainSchema)
+        internal static ISchemaBoundMapper WrapCore<T>(IHostEnvironment env, ISchemaBoundMapper mapper, RoleMappedSchema trainSchema)
         {
             Contracts.AssertValue(env);
             env.AssertValue(mapper);
@@ -483,24 +440,24 @@ namespace Microsoft.ML.Runtime.Data
             env.Assert(mapper is ISchemaBoundRowMapper);
 
             // Key values from the training schema label, will map to slot names of the score output.
-            var type = trainSchema.Schema.GetMetadataTypeOrNull(MetadataUtils.Kinds.KeyValues, trainSchema.Label.Index);
+            var type = trainSchema.Label.Value.Annotations.Schema.GetColumnOrNull(AnnotationUtils.Kinds.KeyValues)?.Type;
             env.AssertValue(type);
-            env.Assert(type.IsVector);
+            env.Assert(type is VectorType);
 
             // Wrap the fetching of the metadata as a simple getter.
             ValueGetter<VBuffer<T>> getter =
                 (ref VBuffer<T> value) =>
                 {
-                    trainSchema.Schema.GetMetadata(MetadataUtils.Kinds.KeyValues,
-                        trainSchema.Label.Index, ref value);
+                    trainSchema.Label.Value.GetKeyValues(ref value);
                 };
 
-            return LabelNameBindableMapper.CreateBound<T>(env, (ISchemaBoundRowMapper)mapper, type.AsVector, getter, MetadataUtils.Kinds.SlotNames, CanWrap);
+            return LabelNameBindableMapper.CreateBound<T>(env, (ISchemaBoundRowMapper)mapper, type as VectorType, getter, AnnotationUtils.Kinds.SlotNames, CanWrap);
         }
 
-        public MultiClassClassifierScorer(IHostEnvironment env, Arguments args, IDataView data, ISchemaBoundMapper mapper, RoleMappedSchema trainSchema)
-            : base(args, env, data, WrapIfNeeded(env, mapper, trainSchema), trainSchema, RegistrationName, MetadataUtils.Const.ScoreColumnKind.MultiClassClassification,
-                MetadataUtils.Const.ScoreValueKind.Score, OutputTypeMatches, GetPredColType)
+        [BestFriend]
+        internal MultiClassClassifierScorer(IHostEnvironment env, Arguments args, IDataView data, ISchemaBoundMapper mapper, RoleMappedSchema trainSchema)
+            : base(args, env, data, WrapIfNeeded(env, mapper, trainSchema), trainSchema, RegistrationName, AnnotationUtils.Const.ScoreColumnKind.MultiClassClassification,
+                AnnotationUtils.Const.ScoreValueKind.Score, OutputTypeMatches, GetPredColType)
         {
         }
 
@@ -516,7 +473,10 @@ namespace Microsoft.ML.Runtime.Data
             // <base info>
         }
 
-        public static MultiClassClassifierScorer Create(IHostEnvironment env, ModelLoadContext ctx, IDataView input)
+        /// <summary>
+        /// Corresponds to <see cref="SignatureLoadDataTransform"/>.
+        /// </summary>
+        private static MultiClassClassifierScorer Create(IHostEnvironment env, ModelLoadContext ctx, IDataView input)
         {
             Contracts.CheckValue(env, nameof(env));
             var h = env.Register(RegistrationName);
@@ -526,7 +486,7 @@ namespace Microsoft.ML.Runtime.Data
             return h.Apply("Loading Model", ch => new MultiClassClassifierScorer(h, ctx, input));
         }
 
-        protected override void SaveCore(ModelSaveContext ctx)
+        private protected override void SaveCore(ModelSaveContext ctx)
         {
             Contracts.AssertValue(ctx);
             ctx.SetVersionInfo(GetVersionInfo());
@@ -537,7 +497,7 @@ namespace Microsoft.ML.Runtime.Data
             base.SaveCore(ctx);
         }
 
-        public override IDataTransform ApplyToData(IHostEnvironment env, IDataView newSource)
+        private protected override IDataTransform ApplyToDataCore(IHostEnvironment env, IDataView newSource)
         {
             Contracts.CheckValue(env, nameof(env));
             Contracts.CheckValue(newSource, nameof(newSource));
@@ -545,31 +505,31 @@ namespace Microsoft.ML.Runtime.Data
             return new MultiClassClassifierScorer(env, this, newSource);
         }
 
-        protected override Delegate GetPredictedLabelGetter(IRow output, out Delegate scoreGetter)
+        protected override Delegate GetPredictedLabelGetter(DataViewRow output, out Delegate scoreGetter)
         {
             Host.AssertValue(output);
             Host.Assert(output.Schema == Bindings.RowMapper.OutputSchema);
-            Host.Assert(output.IsColumnActive(Bindings.ScoreColumnIndex));
+            Host.Assert(output.IsColumnActive(output.Schema[Bindings.ScoreColumnIndex]));
 
-            ValueGetter<VBuffer<Float>> mapperScoreGetter = output.GetGetter<VBuffer<Float>>(Bindings.ScoreColumnIndex);
+            ValueGetter<VBuffer<float>> mapperScoreGetter = output.GetGetter<VBuffer<float>>(Bindings.RowMapper.OutputSchema[Bindings.ScoreColumnIndex]);
 
             long cachedPosition = -1;
-            VBuffer<Float> score = default(VBuffer<Float>);
-            int scoreLength = Bindings.PredColType.KeyCount;
+            VBuffer<float> score = default;
+            int scoreLength = Bindings.PredColType.GetKeyCountAsInt32(Host);
 
             ValueGetter<uint> predFn =
                 (ref uint dst) =>
                 {
                     EnsureCachedPosition(ref cachedPosition, ref score, output, mapperScoreGetter);
                     Host.Check(score.Length == scoreLength);
-                    int index = VectorUtils.ArgMax(ref score);
+                    int index = VectorUtils.ArgMax(in score);
                     if (index < 0)
                         dst = 0;
                     else
                         dst = (uint)index + 1;
                 };
-            ValueGetter<VBuffer<Float>> scoreFn =
-                (ref VBuffer<Float> dst) =>
+            ValueGetter<VBuffer<float>> scoreFn =
+                (ref VBuffer<float> dst) =>
                 {
                     EnsureCachedPosition(ref cachedPosition, ref score, output, mapperScoreGetter);
                     Host.Check(score.Length == scoreLength);
@@ -580,20 +540,15 @@ namespace Microsoft.ML.Runtime.Data
             return predFn;
         }
 
-        protected override JToken PredictedLabelPfa(string[] mapperOutputs)
+        private protected override JToken PredictedLabelPfa(string[] mapperOutputs)
         {
             Contracts.Assert(Utils.Size(mapperOutputs) == 1);
             return PfaUtils.Call("a.argmax", mapperOutputs[0]);
         }
 
-        private static ColumnType GetPredColType(ColumnType scoreType, ISchemaBoundRowMapper mapper)
-        {
-            return new KeyType(DataKind.U4, 0, scoreType.VectorSize);
-        }
+        private static DataViewType GetPredColType(DataViewType scoreType, ISchemaBoundRowMapper mapper) => new KeyType(typeof(uint), scoreType.GetVectorSize());
 
-        private static bool OutputTypeMatches(ColumnType scoreType)
-        {
-            return scoreType.IsKnownSizeVector && scoreType.ItemType == NumberType.Float;
-        }
+        private static bool OutputTypeMatches(DataViewType scoreType) =>
+            scoreType is VectorType vectorType && vectorType.IsKnownSize && vectorType.ItemType == NumberDataViewType.Single;
     }
 }

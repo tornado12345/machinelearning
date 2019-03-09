@@ -2,12 +2,11 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Float = System.Single;
-
 using System;
-using Microsoft.ML.Runtime.EntryPoints;
+using Microsoft.ML.EntryPoints;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime
+namespace Microsoft.ML.Trainers
 {
     public interface ILossFunction<in TOutput, in TLabel>
     {
@@ -18,12 +17,12 @@ namespace Microsoft.ML.Runtime
         Double Loss(TOutput output, TLabel label);
     }
 
-    public interface IScalarOutputLoss : ILossFunction<Float, Float>
+    public interface IScalarOutputLoss : ILossFunction<float, float>
     {
         /// <summary>
         /// Derivative of the loss function with respect to output
         /// </summary>
-        Float Derivative(Float output, Float label);
+        float Derivative(float output, float label);
     }
 
     [TlcModule.ComponentKind("RegressionLossFunction")]
@@ -47,10 +46,10 @@ namespace Microsoft.ML.Runtime
     /// <summary>
     /// Delegate signature for standardized classification loss functions.
     /// </summary>
-    public delegate void SignatureClassificationLoss();
+    internal delegate void SignatureClassificationLoss();
 
     /// <summary>
     /// Delegate signature for standardized regression loss functions.
     /// </summary>
-    public delegate void SignatureRegressionLoss();
+    internal delegate void SignatureRegressionLoss();
 }

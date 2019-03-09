@@ -1,34 +1,25 @@
 <Project>
 
-
-  <Target Name="CopyNativeAssemblies"
-          BeforeTargets="PrepareForRun">
-
-    <PropertyGroup>
-      <LibPrefix Condition="'$(OS)' != 'Windows_NT'">lib</LibPrefix>
-      <LibExtension Condition="'$(OS)' == 'Windows_NT'">.dll</LibExtension>
-      <LibExtension Condition="'$(OS)' != 'Windows_NT'">.so</LibExtension>
-      <LibExtension Condition="$([MSBuild]::IsOSPlatform('osx'))">.dylib</LibExtension>
-    </PropertyGroup>
-
-    <ItemGroup>
-      <NativeAssemblyReference>
-        <FullAssemblyPath>$(NativeOutputPath)$(LibPrefix)%(NativeAssemblyReference.Identity)$(LibExtension)</FullAssemblyPath>
-      </NativeAssemblyReference>
-    </ItemGroup>
-
-    <Copy SourceFiles = "@(NativeAssemblyReference->'%(FullAssemblyPath)')"
-          DestinationFolder="$(OutputPath)"
-          OverwriteReadOnlyFiles="$(OverwriteReadOnlyFiles)"
-          Retries="$(CopyRetryCount)"
-          RetryDelayMilliseconds="$(CopyRetryDelayMilliseconds)"
-          UseHardlinksIfPossible="$(CreateHardLinksForPublishFilesIfPossible)"
-          UseSymboliclinksIfPossible="$(CreateSymbolicLinksForPublishFilesIfPossible)">
-      <Output TaskParameter="DestinationFiles" ItemName="FileWrites"/>
-    </Copy>
-    
-  </Target>
-  
   <Import Project="..\Directory.Build.targets" />
+
+  <PropertyGroup>
+    <!-- This needs to be in Directory.Build.targets or the default value for AllowedReferenceRelatedFileExtensions will not be applied. 
+         This is required in order to have following extension files in the output folder of the projects referencing other projects. -->
+    <AllowedReferenceRelatedFileExtensions>$(AllowedReferenceRelatedFileExtensions);.runtimeconfig.json;.runtimeconfig.dev.json;.deps.json</AllowedReferenceRelatedFileExtensions>  
+  </PropertyGroup>
+
+  <!-- Workaround for https://github.com/tonerdo/coverlet/pull/318 -->
+  <Target Name="UpdateTargetPathForCoverage" BeforeTargets="InstrumentModulesNoBuild;InstrumentModulesAfterBuild">
+    <PropertyGroup>
+      <_CoverletOriginalTargetPath>$(TargetPath)</_CoverletOriginalTargetPath>
+      <TargetPath>$([System.IO.Path]::GetDirectoryName($(TargetPath)))\NonExistent.dll</TargetPath>
+    </PropertyGroup>
+  </Target>
+
+  <Target Name="UpdateTargetPathAfterCoverage" AfterTargets="InstrumentModulesNoBuild;InstrumentModulesAfterBuild">
+    <PropertyGroup>
+      <TargetPath>$(_CoverletOriginalTargetPath)</TargetPath>
+    </PropertyGroup>
+  </Target>
 
 </Project>

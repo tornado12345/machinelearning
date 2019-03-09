@@ -7,13 +7,12 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.ML.Runtime;
 
-namespace Microsoft.ML.Runtime.FastTree.Internal
+namespace Microsoft.ML.Trainers.FastTree
 {
-    public class TestResult : IComparable<TestResult>
+    internal sealed class TestResult : IComparable<TestResult>
     {
-        private double _finalValue;
-
         public enum ValueOperator : int
         {
             None = 0, // the final value will be the raw value,
@@ -36,33 +35,31 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             // the raw value should be the same constant for all test results.
         }
 
-        public string LossFunctionName { get; private set; }
+        public string LossFunctionName { get; }
 
         /// <summary>
         /// Raw value used for calculating final test result value.
         /// </summary>
-        public double RawValue { get; private set; }
+        public double RawValue { get; }
 
         /// <summary>
         /// The factor used for calculating final test result value.
         /// </summary>
-        public double Factor { get; private set; }
+        public double Factor { get; }
 
         /// <summary>
         /// The operator used for calculating final test result value.
         /// Final value = Operator(RawValue, Factor)
         /// </summary>
-        public ValueOperator Operator { get; private set; }
+        public ValueOperator Operator { get; }
 
         /// <summary>
         /// Indicates that the lower value of this metric is better
         /// This is used for early stopping (with TestHistory and TestWindowWithTolerance)
         /// </summary>
-        public bool LowerIsBetter { get; private set; }
+        public bool LowerIsBetter { get; }
 
-        public double FinalValue {
-            get { return _finalValue; }
-        }
+        public double FinalValue { get; }
 
         public TestResult(string lossFunctionName, double rawValue, double factor, bool lowerIsBetter, ValueOperator valueOperator)
         {
@@ -72,7 +69,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
             Operator = valueOperator;
             LowerIsBetter = lowerIsBetter;
 
-            CalculateFinalValue();
+            FinalValue = CalculateFinalValue();
         }
 
         public int CompareTo(TestResult o)
@@ -124,7 +121,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
                 (ValueOperator)valueOperator);
         }
 
-        private void CalculateFinalValue()
+        private double CalculateFinalValue()
         {
             switch (Operator)
             {
@@ -133,21 +130,18 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
                 case ValueOperator.Min:
                 case ValueOperator.None:
                 case ValueOperator.Sum:
-                    _finalValue = RawValue;
-                    break;
+                    return RawValue;
                 case ValueOperator.Average:
-                    _finalValue = RawValue / Factor;
-                    break;
+                    return RawValue / Factor;
                 case ValueOperator.SqrtAverage:
-                    _finalValue = Math.Sqrt(RawValue / Factor);
-                    break;
+                    return Math.Sqrt(RawValue / Factor);
                 default:
                     throw Contracts.Except("Unsupported value operator: {0}", Operator);
             }
         }
     }
 
-    public abstract class Test
+    internal abstract class Test
     {
         public ScoreTracker ScoreTracker;
         public Dataset Dataset => ScoreTracker.Dataset;
@@ -157,7 +151,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
         //The method returns one or more losses on a given Dataset
         public abstract IEnumerable<TestResult> ComputeTests(double[] scores);
-        public Test(ScoreTracker scoreTracker)
+        private protected Test(ScoreTracker scoreTracker)
         {
             ScoreTracker = scoreTracker;
             if (ScoreTracker != null)
@@ -200,20 +194,20 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
     // A simple class that tracks history of underlying Test.
     // It captures an iteration that peak on a given metric
     // Each itaratin captures an array of LossFunctions computed by inderlying Test
-    public class TestHistory : Test
+    internal class TestHistory : Test
     {
         public readonly Test SimpleTest;
-        protected readonly int LossIndex;
+        public readonly int LossIndex;
         protected IList<TestResult[]> History;
         protected int Iteration { get; private set; }
 
-        public TestResult BestResult { get; protected internal set; }
-        public int BestIteration { get; protected internal set; }
+        public TestResult BestResult { get; private protected set; }
+        public int BestIteration { get; private protected set; }
 
         // scenarioWithoutHistory - simple test scenario we want to track the history and look for best iteration
         // lossIndex - index of lossFunction in case Test returns more than one loss (default should be 0)
         // lower is better: are we looking for minimum or maximum of loss function?
-        public TestHistory(Test scenarioWithoutHistory, int lossIndex)
+        internal TestHistory(Test scenarioWithoutHistory, int lossIndex)
             : base(null)
         {
             History = new List<TestResult[]>();
@@ -261,7 +255,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
     // A class that tracks history of underlying Test.
     // Can capture an iteration that peak on a given metric
     // Each itaratin captures an array of LossFunctions computed by inderlying Test
-    public class TestWindowWithTolerance : TestHistory
+    internal class TestWindowWithTolerance : TestHistory
     {
         // Struct to keep information for tolerant early stopping
         private struct ValueIterationPair
@@ -341,7 +335,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
     }
 
-    public class NdcgTest : Test
+    internal class NdcgTest : Test
     {
         protected readonly DcgCalculator DcgCalculator;
         private readonly string _sortingAlgorithm;
@@ -384,7 +378,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
     }
 
-    public class FastNdcgTest : NdcgTest
+    internal class FastNdcgTest : NdcgTest
     {
         protected readonly int NdcgTruncation;
 
@@ -421,7 +415,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
     }
 
-    public sealed class FastNdcgTestForTrainSet : FastNdcgTest
+    internal sealed class FastNdcgTestForTrainSet : FastNdcgTest
     {
         private readonly ScoreTracker _trainingScores;
         private readonly FastTreeRankingTrainer.LambdaRankObjectiveFunction _rankingObjectiveFunction;
@@ -464,7 +458,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
     }
 
-    public sealed class WinLossSurplusTest : Test
+    internal sealed class WinLossSurplusTest : Test
     {
         private readonly Lazy<WinLossCalculator> _winLossCalculator;
 
@@ -520,7 +514,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
     }
 
-    public sealed class RegressionTest : Test
+    internal sealed class RegressionTest : Test
     {
         private readonly float[] _labels;
         private readonly int? _resultType;
@@ -592,18 +586,18 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
         }
     }
 
-    public sealed class BinaryClassificationTest : Test
+    internal sealed class BinaryClassificationTest : Test
     {
         private readonly bool[] _binaryLabels;
         private readonly double _recipNpos;
         private readonly double _recipNneg;
-        private readonly double _learningRate;
+        private readonly double _sigmoidParameter;
 
-        public BinaryClassificationTest(ScoreTracker scoreTracker, bool[] binaryLabels, double learningRate)
+        public BinaryClassificationTest(ScoreTracker scoreTracker, bool[] binaryLabels, double sigmoidParameter)
             : base(scoreTracker)
         {
             _binaryLabels = binaryLabels;
-            _learningRate = learningRate;
+            _sigmoidParameter = sigmoidParameter;
 
             Contracts.Check(scoreTracker.Dataset.NumDocs == binaryLabels.Length, "Mismatch between dataset and labels");
 
@@ -683,7 +677,7 @@ namespace Microsoft.ML.Runtime.FastTree.Internal
 
                         const double documentWeight = 1.0;
                         bool correct = !(label ^ predictedClass);
-                        double loss = Math.Log(1.0 + Math.Exp(-2.0 * _learningRate * (label ? 1 : -1) * scores[i]));
+                        double loss = Math.Log(1.0 + Math.Exp(-1.0 * _sigmoidParameter * (label ? 1 : -1) * scores[i]));
 
                         errorRate += (correct ? 0 : 1) * documentWeight;
                         lossRate += loss * documentWeight;
