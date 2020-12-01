@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.Data.IO;
@@ -25,13 +24,13 @@ using Microsoft.ML.Trainers.Recommender;
 namespace Microsoft.ML.Trainers.Recommender
 {
     /// <summary>
-    /// Model parameters for matrix factorization recommender.
+    /// Model parameters for <see cref="MatrixFactorizationTrainer"/>.
     /// </summary>
     /// <remarks>
     /// <see cref="MatrixFactorizationModelParameters"/> stores two factor matrices, P and Q, for approximating the training matrix, R, by P * Q,
     /// where * is a matrix multiplication. This model expects two inputs, row index and column index, and produces the (approximated)
     /// value at the location specified by the two inputs in R. More specifically, if input row and column indices are u and v, respectively.
-    /// The output (a scalar) would be the inner product product of the u-th row in P and the v-th column in Q.
+    /// The output (a scalar) would be the inner product of the u-th row in P and the v-th column in Q.
     /// </remarks>
     public sealed class MatrixFactorizationModelParameters : IPredictor, ICanSaveModel, ICanSaveInTextFormat, ISchemaBindableMapper
     {
@@ -90,7 +89,7 @@ namespace Microsoft.ML.Trainers.Recommender
         internal DataViewType MatrixColumnIndexType { get; }
         internal DataViewType MatrixRowIndexType { get; }
 
-        internal MatrixFactorizationModelParameters(IHostEnvironment env, SafeTrainingAndModelBuffer buffer, KeyType matrixColumnIndexType, KeyType matrixRowIndexType)
+        internal MatrixFactorizationModelParameters(IHostEnvironment env, SafeTrainingAndModelBuffer buffer, KeyDataViewType matrixColumnIndexType, KeyDataViewType matrixRowIndexType)
         {
             Contracts.CheckValue(env, nameof(env));
             _host = env.Register(RegistrationName);
@@ -146,14 +145,14 @@ namespace Microsoft.ML.Trainers.Recommender
             _leftFactorMatrix = Utils.ReadSingleArray(ctx.Reader, checked(NumberOfRows * ApproximationRank));
             _rightFactorMatrix = Utils.ReadSingleArray(ctx.Reader, checked(NumberOfColumns * ApproximationRank));
 
-            MatrixColumnIndexType = new KeyType(typeof(uint), NumberOfColumns);
-            MatrixRowIndexType = new KeyType(typeof(uint), NumberOfRows);
+            MatrixColumnIndexType = new KeyDataViewType(typeof(uint), NumberOfColumns);
+            MatrixRowIndexType = new KeyDataViewType(typeof(uint), NumberOfRows);
         }
 
         /// <summary>
         /// Load model from the given context
         /// </summary>
-        private static MatrixFactorizationModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
+        internal static MatrixFactorizationModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
         {
             Contracts.CheckValue(env, nameof(env));
             env.CheckValue(ctx, nameof(ctx));
@@ -256,6 +255,16 @@ namespace Microsoft.ML.Trainers.Recommender
             return mapper as ValueMapper<TMatrixColumnIndexIn, TMatrixRowIndexIn, TOut>;
         }
 
+        /// <summary>
+        /// Compute the (approximated) value at the <paramref name="srcCol"/>-th column and the
+        /// <paramref name="srcRow"/>-th row. Notice that both of <paramref name="srcCol"/> and
+        /// <paramref name="srcRow"/> are 1-based indexes, so the first row/column index is 1.
+        /// The reason for having 1-based indexing system is that key-valued getter in ML.NET returns
+        /// 1 for its first value and 0 is used to denote missing value.
+        /// </summary>
+        /// <param name="srcCol">1-based column index.</param>
+        /// <param name="srcRow">1-based row index.</param>
+        /// <param name="dst">value at the <paramref name="srcCol"/>-th column and the <paramref name="srcRow"/>-th row.</param>
         private void MapperCore(in uint srcCol, ref uint srcRow, ref float dst)
         {
             // REVIEW: The key-type version a bit more "strict" than the predictor
@@ -268,9 +277,21 @@ namespace Microsoft.ML.Trainers.Recommender
                 dst = float.NaN;
                 return;
             }
+
+            // The index system in the LIBMF (the library trains the model) is 0-based, so we need to deduct one
+            // from 1-based indexes returned by ML.NET's key-valued getters. We also throw when seeing 0 because
+            // missing index is not meaningful to the trained model.
             dst = Score((int)(srcCol - 1), (int)(srcRow - 1));
         }
 
+        /// <summary>
+        /// Compute the (approximated) value at the <paramref name="columnIndex"/>-th column and the
+        /// <paramref name="rowIndex"/>-th row. Notice that, in contrast to <see cref="MapperCore"/>,
+        /// both of <paramref name="columnIndex"/> and <paramref name="rowIndex"/> are 0-based indexes,
+        /// so the first row/column index is 0.
+        /// </summary>
+        /// <param name="columnIndex">0-based column index.</param>
+        /// <param name="rowIndex">0-based row index.</param>
         private float Score(int columnIndex, int rowIndex)
         {
             _host.Assert(0 <= rowIndex && rowIndex < NumberOfRows);
@@ -535,7 +556,7 @@ namespace Microsoft.ML.Trainers.Recommender
                 loaderSignature: LoaderSignature,
                 loaderAssemblyName: typeof(MatrixFactorizationPredictionTransformer).Assembly.FullName);
         }
-        private static MatrixFactorizationPredictionTransformer Create(IHostEnvironment env, ModelLoadContext ctx)
+        internal static MatrixFactorizationPredictionTransformer Create(IHostEnvironment env, ModelLoadContext ctx)
             => new MatrixFactorizationPredictionTransformer(env, ctx);
 
     }

@@ -3,13 +3,13 @@
 // See the LICENSE file in the project root for more information.
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data.Conversion;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
@@ -25,32 +25,46 @@ namespace Microsoft.ML.Data
         /// </summary>
         private sealed class ValueCreatorCache
         {
-            private static volatile ValueCreatorCache _instance;
-            public static ValueCreatorCache Instance
+            private static readonly FuncInstanceMethodInfo1<ValueCreatorCache, PrimitiveDataViewType, Func<RowSet, ColumnPipe>> _getCreatorOneCoreMethodInfo
+                = FuncInstanceMethodInfo1<ValueCreatorCache, PrimitiveDataViewType, Func<RowSet, ColumnPipe>>.Create(target => target.GetCreatorOneCore<int>);
+
+            private static readonly FuncInstanceMethodInfo1<ValueCreatorCache, PrimitiveDataViewType, Func<RowSet, ColumnPipe>> _getCreatorVecCoreMethodInfo
+                = FuncInstanceMethodInfo1<ValueCreatorCache, PrimitiveDataViewType, Func<RowSet, ColumnPipe>>.Create(target => target.GetCreatorVecCore<int>);
+
+            private static volatile ValueCreatorCache _defaultInstance;
+            public static ValueCreatorCache DefaultInstance
             {
                 get
                 {
-                    return _instance ??
-                        Interlocked.CompareExchange(ref _instance, new ValueCreatorCache(), null) ??
-                        _instance;
+                    return _defaultInstance ??
+                        Interlocked.CompareExchange(ref _defaultInstance, new ValueCreatorCache(), null) ??
+                        _defaultInstance;
                 }
             }
 
+            private static readonly ConcurrentDictionary<DoubleParser.OptionFlags, ValueCreatorCache> _customInstances
+                = new ConcurrentDictionary<DoubleParser.OptionFlags, ValueCreatorCache>();
+
+            public static ValueCreatorCache GetInstanceWithDoubleParserOptionFlags(DoubleParser.OptionFlags doubleParserOptionFlags)
+            {
+                if (!_customInstances.ContainsKey(doubleParserOptionFlags))
+                    return _customInstances.GetOrAdd(doubleParserOptionFlags, new ValueCreatorCache(doubleParserOptionFlags));
+
+                return _customInstances[doubleParserOptionFlags];
+            }
+
             private readonly Conversions _conv;
-            private readonly MethodInfo _methOne;
-            private readonly MethodInfo _methVec;
 
             // Indexed by DataKind.ToIndex()
             private readonly Func<RowSet, ColumnPipe>[] _creatorsOne;
             private readonly Func<RowSet, ColumnPipe>[] _creatorsVec;
 
-            private ValueCreatorCache()
+            private ValueCreatorCache(DoubleParser.OptionFlags doubleParserOptionFlags = DoubleParser.OptionFlags.Default)
             {
-                _conv = Conversions.Instance;
-                _methOne = new Func<PrimitiveDataViewType, Func<RowSet, ColumnPipe>>(GetCreatorOneCore<int>)
-                    .GetMethodInfo().GetGenericMethodDefinition();
-                _methVec = new Func<PrimitiveDataViewType, Func<RowSet, ColumnPipe>>(GetCreatorVecCore<int>)
-                    .GetMethodInfo().GetGenericMethodDefinition();
+                if (doubleParserOptionFlags == DoubleParser.OptionFlags.Default)
+                    _conv = Conversions.DefaultInstance;
+                else
+                    _conv = Conversions.CreateInstanceWithDoubleParserOptions(doubleParserOptionFlags);
 
                 _creatorsOne = new Func<RowSet, ColumnPipe>[InternalDataKindExtensions.KindCount];
                 _creatorsVec = new Func<RowSet, ColumnPipe>[InternalDataKindExtensions.KindCount];
@@ -64,13 +78,12 @@ namespace Microsoft.ML.Data
 
             private Func<RowSet, ColumnPipe> GetCreatorOneCore(PrimitiveDataViewType type)
             {
-                MethodInfo meth = _methOne.MakeGenericMethod(type.RawType);
-                return (Func<RowSet, ColumnPipe>)meth.Invoke(this, new object[] { type });
+                return Utils.MarshalInvoke(_getCreatorOneCoreMethodInfo, this, type.RawType, type);
             }
 
             private Func<RowSet, ColumnPipe> GetCreatorOneCore<T>(PrimitiveDataViewType type)
             {
-                Contracts.Assert(type.IsStandardScalar() || type is KeyType);
+                Contracts.Assert(type.IsStandardScalar() || type is KeyDataViewType);
                 Contracts.Assert(typeof(T) == type.RawType);
                 var fn = _conv.GetTryParseConversion<T>(type);
                 return rows => new PrimitivePipe<T>(rows, type, fn);
@@ -78,30 +91,27 @@ namespace Microsoft.ML.Data
 
             private Func<RowSet, ColumnPipe> GetCreatorVecCore(PrimitiveDataViewType type)
             {
-                MethodInfo meth = _methVec.MakeGenericMethod(type.RawType);
-                return (Func<RowSet, ColumnPipe>)meth.Invoke(this, new object[] { type });
+                return Utils.MarshalInvoke(_getCreatorVecCoreMethodInfo, this, type.RawType, type);
             }
 
             private Func<RowSet, ColumnPipe> GetCreatorVecCore<T>(PrimitiveDataViewType type)
             {
-                Contracts.Assert(type.IsStandardScalar() || type is KeyType);
+                Contracts.Assert(type.IsStandardScalar() || type is KeyDataViewType);
                 Contracts.Assert(typeof(T) == type.RawType);
                 var fn = _conv.GetTryParseConversion<T>(type);
                 return rows => new VectorPipe<T>(rows, type, fn);
             }
 
-            public Func<RowSet, ColumnPipe> GetCreatorOne(KeyType key)
+            public Func<RowSet, ColumnPipe> GetCreatorOne(KeyDataViewType key)
             {
                 // Have to produce a specific one - can't use a cached one.
-                MethodInfo meth = _methOne.MakeGenericMethod(key.RawType);
-                return (Func<RowSet, ColumnPipe>)meth.Invoke(this, new object[] { key });
+                return Utils.MarshalInvoke(_getCreatorOneCoreMethodInfo, this, key.RawType, key);
             }
 
-            public Func<RowSet, ColumnPipe> GetCreatorVec(KeyType key)
+            public Func<RowSet, ColumnPipe> GetCreatorVec(KeyDataViewType key)
             {
                 // Have to produce a specific one - can't use a cached one.
-                MethodInfo meth = _methVec.MakeGenericMethod(key.RawType);
-                return (Func<RowSet, ColumnPipe>)meth.Invoke(this, new object[] { key });
+                return Utils.MarshalInvoke(_getCreatorVecCoreMethodInfo, this, key.RawType, key);
             }
 
             public Func<RowSet, ColumnPipe> GetCreatorOne(InternalDataKind kind)
@@ -218,6 +228,8 @@ namespace Microsoft.ML.Data
 
             public abstract bool HasNA { get; }
 
+            public abstract bool IsReal { get; } // If the type of the ColumnPipe is either Single or Double
+
             protected ColumnPipe(RowSet rows)
             {
                 Contracts.AssertValue(rows);
@@ -226,7 +238,7 @@ namespace Microsoft.ML.Data
 
             public abstract void Reset(int irow, int size);
 
-            // Passed by-ref for effeciency, not so it can be modified.
+            // Passed by-ref for efficiency, not so it can be modified.
             public abstract bool Consume(int irow, int index, ref ReadOnlyMemory<char> text);
 
             public abstract Delegate GetGetter();
@@ -241,6 +253,8 @@ namespace Microsoft.ML.Data
 
             public override bool HasNA { get; }
 
+            public override bool IsReal { get;  }
+
             public PrimitivePipe(RowSet rows, PrimitiveDataViewType type, TryParseMapper<TResult> conv)
                 : base(rows)
             {
@@ -248,7 +262,8 @@ namespace Microsoft.ML.Data
                 Contracts.Assert(typeof(TResult) == type.RawType);
                 _conv = conv;
                 _values = new TResult[Rows.Count];
-                HasNA = Conversions.Instance.TryGetIsNAPredicate(type, out var del);
+                HasNA = Conversions.DefaultInstance.TryGetIsNAPredicate(type, out var del);
+                IsReal = typeof(TResult) == typeof(Single) || typeof(TResult) == typeof(Double);
             }
 
             public override void Reset(int irow, int size)
@@ -284,6 +299,8 @@ namespace Microsoft.ML.Data
             private readonly TryParseMapper<TItem> _conv;
 
             public override bool HasNA { get; }
+
+            public override bool IsReal { get; }
 
             private class VectorValue
             {
@@ -430,7 +447,8 @@ namespace Microsoft.ML.Data
                 _values = new VectorValue[Rows.Count];
                 for (int i = 0; i < _values.Length; i++)
                     _values[i] = new VectorValue(this);
-                HasNA = Conversions.Instance.TryGetIsNAPredicate(type, out var del);
+                HasNA = Conversions.DefaultInstance.TryGetIsNAPredicate(type, out var del);
+                IsReal = typeof(TItem) == typeof(Single) || typeof(TItem) == typeof(Double);
             }
 
             public override void Reset(int irow, int size)
@@ -639,6 +657,8 @@ namespace Microsoft.ML.Data
 
             private readonly char[] _separators;
             private readonly OptionFlags _flags;
+            private readonly bool _missingRealsAsNaNs;
+            private readonly char _escapeChar;
             private readonly int _inputSize;
             private readonly ColInfo[] _infos;
 
@@ -648,34 +668,49 @@ namespace Microsoft.ML.Data
             private volatile int _csrc;
             private volatile int _mismatchCount;
 
+            private ReadOnlyMemory<char> _blank;
+
             public Parser(TextLoader parent)
             {
                 Contracts.AssertValue(parent);
 
                 _infos = parent._bindings.Infos;
                 _creator = new Func<RowSet, ColumnPipe>[_infos.Length];
-                var cache = ValueCreatorCache.Instance;
+
+                ValueCreatorCache cache;
+
+                var doubleParserOptionFlags = DoubleParser.OptionFlags.Default;
+                if (parent._decimalMarker == ',')
+                    doubleParserOptionFlags |= DoubleParser.OptionFlags.UseCommaAsDecimalMarker;
+                if ((parent._flags & OptionFlags.MissingRealsAsNaNs) != 0)
+                    doubleParserOptionFlags |= DoubleParser.OptionFlags.EmptyAsNaN;
+
+                if (doubleParserOptionFlags == DoubleParser.OptionFlags.Default)
+                    cache = ValueCreatorCache.DefaultInstance;
+                else
+                    cache = ValueCreatorCache.GetInstanceWithDoubleParserOptionFlags(doubleParserOptionFlags);
+
                 var mapOne = new Dictionary<InternalDataKind, Func<RowSet, ColumnPipe>>();
                 var mapVec = new Dictionary<InternalDataKind, Func<RowSet, ColumnPipe>>();
                 for (int i = 0; i < _creator.Length; i++)
                 {
                     var info = _infos[i];
 
-                    if (info.ColType is KeyType keyType)
+                    if (info.ColType is KeyDataViewType keyType)
                     {
                         _creator[i] = cache.GetCreatorOne(keyType);
                         continue;
                     }
 
-                    VectorType vectorType = info.ColType as VectorType;
-                    if (vectorType?.ItemType is KeyType vectorKeyType)
+                    VectorDataViewType vectorType = info.ColType as VectorDataViewType;
+                    if (vectorType?.ItemType is KeyDataViewType vectorKeyType)
                     {
                         _creator[i] = cache.GetCreatorVec(vectorKeyType);
                         continue;
                     }
 
                     DataViewType itemType = vectorType?.ItemType ?? info.ColType;
-                    Contracts.Assert(itemType is KeyType || itemType.IsStandardScalar());
+                    Contracts.Assert(itemType is KeyDataViewType || itemType.IsStandardScalar());
                     var map = vectorType != null ? mapVec : mapOne;
                     if (!map.TryGetValue(info.Kind, out _creator[i]))
                     {
@@ -689,7 +724,10 @@ namespace Microsoft.ML.Data
 
                 _separators = parent._separators;
                 _flags = parent._flags;
+                _escapeChar = parent._escapeChar;
                 _inputSize = parent._inputSize;
+                _missingRealsAsNaNs = (parent._flags & OptionFlags.MissingRealsAsNaNs) != 0;
+                _blank = ReadOnlyMemory<char>.Empty;
                 Contracts.Assert(_inputSize >= 0);
             }
 
@@ -701,7 +739,7 @@ namespace Microsoft.ML.Data
                 minSize = int.MaxValue;
                 maxSize = 0;
                 var stats = new ParseStats(parent._host, cref: 1, maxShow: 0);
-                var impl = new HelperImpl(stats, parent._flags, parent._separators, 0, int.MaxValue);
+                var impl = new HelperImpl(stats, parent._flags, parent._separators, parent._escapeChar, 0, int.MaxValue);
                 try
                 {
                     foreach (var line in lines)
@@ -737,7 +775,7 @@ namespace Microsoft.ML.Data
 
                 var sb = new StringBuilder();
                 var stats = new ParseStats(parent._host, cref: 1, maxShow: 0);
-                var impl = new HelperImpl(stats, parent._flags, parent._separators, parent._inputSize, int.MaxValue);
+                var impl = new HelperImpl(stats, parent._flags, parent._separators, parent._escapeChar, parent._inputSize, int.MaxValue);
                 try
                 {
                     impl.GatherFields(textHeader, textHeader.Span);
@@ -853,7 +891,7 @@ namespace Microsoft.ML.Data
             {
                 Contracts.AssertValue(stats);
                 Contracts.Assert(srcNeeded >= 0);
-                return new HelperImpl(stats, _flags, _separators, _inputSize, srcNeeded);
+                return new HelperImpl(stats, _flags, _separators, _escapeChar, _inputSize, srcNeeded);
             }
 
             /// <summary>
@@ -872,10 +910,12 @@ namespace Microsoft.ML.Data
                 private readonly char _sep0;
                 private readonly char _sep1;
                 private readonly bool _sepContainsSpace;
+                private readonly char _escapeChar;
                 private readonly int _inputSize;
                 private readonly int _srcNeeded;
                 private readonly bool _quoting;
                 private readonly bool _sparse;
+                private readonly bool _keepEmpty;
                 // This is a working buffer.
                 private readonly StringBuilder _sb;
 
@@ -884,7 +924,7 @@ namespace Microsoft.ML.Data
 
                 public readonly FieldSet Fields;
 
-                public HelperImpl(ParseStats stats, OptionFlags flags, char[] seps, int inputSize, int srcNeeded)
+                public HelperImpl(ParseStats stats, OptionFlags flags, char[] seps, char escapeChar, int inputSize, int srcNeeded)
                 {
                     Contracts.AssertValue(stats);
                     // inputSize == 0 means unknown.
@@ -898,6 +938,7 @@ namespace Microsoft.ML.Data
                     _sep0 = _seps[0];
                     _sep1 = _seps.Length > 1 ? _seps[1] : '\0';
                     _sepContainsSpace = IsSep(' ');
+                    _escapeChar = escapeChar;
                     _inputSize = inputSize;
                     _srcNeeded = srcNeeded;
                     _quoting = (flags & OptionFlags.AllowQuoting) != 0;
@@ -905,6 +946,11 @@ namespace Microsoft.ML.Data
                     _sb = new StringBuilder();
                     _blank = ReadOnlyMemory<char>.Empty;
                     Fields = new FieldSet();
+
+                    // If we want to impute empty real fields as NaNs, then we must keep
+                    // all empty field spans, as there's no way for the Parser.HelperImpl
+                    // to know beforehand which fields belong to a float field
+                    _keepEmpty = (flags & OptionFlags.MissingRealsAsNaNs) != 0;
                 }
 
                 /// <summary>
@@ -953,6 +999,13 @@ namespace Microsoft.ML.Data
                                 Fields.Spans[Fields.Count] = scan.Span;
                                 Fields.Indices[Fields.Count++] = src;
                             }
+                            else if(_keepEmpty)
+                            {
+                                Fields.EnsureSpace();
+                                Fields.Spans[Fields.Count] = _blank;
+                                Fields.Indices[Fields.Count++] = src;
+                            }
+
                             if (++src > _srcNeeded || !more)
                                 break;
                         }
@@ -1018,7 +1071,7 @@ namespace Microsoft.ML.Data
                                 var spanT = Fields.Spans[Fields.Count - 1];
 
                                 int csrc;
-                                if (!Conversions.Instance.TryParse(in spanT, out csrc) || csrc <= 0)
+                                if (!Conversions.DefaultInstance.TryParse(in spanT, out csrc) || csrc <= 0)
                                 {
                                     _stats.LogBadFmt(ref scan, "Bad dimensionality or ambiguous sparse item. Use sparse=- for non-sparse file, and/or quote the value.");
                                     break;
@@ -1157,24 +1210,74 @@ namespace Microsoft.ML.Data
                         ichCur++;
                         _sb.Clear();
                         int ichRun = ichCur;
-                        for (; ; ichCur++)
+                        if (_escapeChar == '"')
                         {
-                            Contracts.Assert(ichCur <= ichLim);
-                            if (ichCur >= ichLim)
+                            for (; ; ichCur++)
                             {
-                                // Missing close quote!
-                                scan.QuotingError = true;
-                                break;
+                                Contracts.Assert(ichCur <= ichLim);
+                                if (ichCur >= ichLim)
+                                {
+                                    // Missing close quote!
+                                    scan.QuotingError = true;
+                                    break;
+                                }
+
+                                // The logic below allow us to escape double quotes (") inside quoted
+                                // fields by using 2 double quotes (""). I.e. when the loader
+                                // encounters "" inside a quoted field, it will output only one "
+                                // and continue parsing the rest of the field.
+                                if (span[ichCur] == '"')
+                                {
+                                    if (ichCur > ichRun)
+                                        _sb.AppendSpan(span.Slice(ichRun, ichCur - ichRun));
+                                    if (++ichCur >= ichLim)
+                                        break;
+                                    if (span[ichCur] != '"')
+                                        break;
+                                    ichRun = ichCur;
+                                }
                             }
-                            if (span[ichCur] == '"')
+                        }
+                        else
+                        {
+                            for (; ; ichCur++)
                             {
-                                if (ichCur > ichRun)
-                                    _sb.AppendSpan(span.Slice(ichRun, ichCur - ichRun));
-                                if (++ichCur >= ichLim)
+                                Contracts.Assert(ichCur <= ichLim);
+                                if (ichCur >= ichLim)
+                                {
+                                    // Missing close quote!
+                                    scan.QuotingError = true;
                                     break;
-                                if (span[ichCur] != '"')
+                                }
+
+                                if (span[ichCur] == _escapeChar)
+                                {
+                                    ichCur++;
+                                    if (ichCur >= ichLim)
+                                    {
+                                        // Missing close quote!
+                                        scan.QuotingError = true;
+                                        break;
+                                    }
+
+                                    if (span[ichCur] == '"')
+                                    {
+                                        // Don't include escapeChar in span
+                                        _sb.AppendSpan(span.Slice(ichRun, ichCur - ichRun - 1));
+                                        ichRun = ichCur;
+                                    }
+
+                                    continue;
+                                }
+
+                                if (span[ichCur] == '"')
+                                {
+                                    if (ichCur > ichRun)
+                                        _sb.AppendSpan(span.Slice(ichRun, ichCur - ichRun));
+
+                                    ichCur++;
                                     break;
-                                ichRun = ichCur;
+                                }
                             }
                         }
 
@@ -1274,7 +1377,7 @@ namespace Microsoft.ML.Data
                     var v = rows.Pipes[iinfo];
                     Contracts.Assert(v != null);
 
-                    if (!(info.ColType is VectorType))
+                    if (!(info.ColType is VectorDataViewType))
                         ProcessOne(fields, info, v, irow, line);
                     else
                         ProcessVec(srcLim, fields, info, v, irow, line);
@@ -1284,7 +1387,7 @@ namespace Microsoft.ML.Data
             private void ProcessVec(int srcLim, FieldSet fields, ColInfo info, ColumnPipe v, int irow, long line)
             {
                 Contracts.Assert(srcLim >= 0);
-                Contracts.Assert(info.ColType is VectorType);
+                Contracts.Assert(info.ColType is VectorDataViewType);
                 Contracts.Assert(info.SizeBase > 0 || info.IsegVariable >= 0);
 
                 int sizeVar = 0;
@@ -1315,10 +1418,10 @@ namespace Microsoft.ML.Data
                     int sizeSeg = lim - min;
                     Contracts.Assert(ivDst <= size - sizeSeg);
 
+                    int indexBase = ivDst - min;
                     int isrc = fields.Indices.FindIndexSorted(0, fields.Count, min);
                     if (isrc < fields.Count && fields.Indices[isrc] < lim)
                     {
-                        int indexBase = ivDst - min;
                         int isrcLim = fields.Indices.FindIndexSorted(isrc, fields.Count, lim);
                         Contracts.Assert(isrc < isrcLim);
                         for (; isrc < isrcLim; isrc++)
@@ -1333,6 +1436,19 @@ namespace Microsoft.ML.Data
                             }
                         }
                     }
+
+                    if(_missingRealsAsNaNs && isrc >= fields.Count && v.IsReal)
+                    {
+                        // If the user has set the MissingRealsAsNaNs option to true,
+                        // And there are missing columns on a given row,
+                        // then we should load them as if they were empty (i.e. _blank) fields
+                        // So that they can be loaded as NaNs if they're single/double columns
+                        // Or as default if they aren't.
+                        for (int srcCur = Math.Max(min, fields.Count); srcCur < lim; srcCur++)
+                        {
+                            v.Consume(irow, indexBase + srcCur, ref _blank);
+                        }
+                    }
                     ivDst += sizeSeg;
                 }
                 Contracts.Assert(ivDst == size);
@@ -1340,7 +1456,7 @@ namespace Microsoft.ML.Data
 
             private void ProcessOne(FieldSet vs, ColInfo info, ColumnPipe v, int irow, long line)
             {
-                Contracts.Assert(!(info.ColType is VectorType));
+                Contracts.Assert(!(info.ColType is VectorDataViewType));
                 Contracts.Assert(Utils.Size(info.Segments) == 1);
                 Contracts.Assert(info.Segments[0].Lim == info.Segments[0].Min + 1);
 
@@ -1354,6 +1470,15 @@ namespace Microsoft.ML.Data
                             throw Contracts.Except($"Could not parse value {vs.Spans[isrc]} in line {line}, column {info.Name}");
                         v.Rows.Stats.LogBadValue(line, info.Name);
                     }
+                }
+                else if(_missingRealsAsNaNs && v.IsReal)
+                {
+                    // If the user has set the MissingRealsAsNaNs option to true,
+                    // And there are missing columns on a given row,
+                    // then we should load them as if they were empty (i.e. _blank) fields
+                    // So that they can be loaded as NaNs if they're single/double columns
+                    // Or as default if they aren't.
+                    v.Consume(irow, 0, ref _blank);
                 }
                 else
                     v.Reset(irow, 0);

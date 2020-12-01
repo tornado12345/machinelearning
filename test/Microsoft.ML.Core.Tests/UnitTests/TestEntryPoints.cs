@@ -7,22 +7,23 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Calibrators;
 using Microsoft.ML.Core.Tests.UnitTests;
 using Microsoft.ML.Data;
 using Microsoft.ML.Data.IO;
 using Microsoft.ML.EntryPoints;
-using Microsoft.ML.ImageAnalytics;
+using Microsoft.ML.Featurizers;
 using Microsoft.ML.Internal.Utilities;
-using Microsoft.ML.LightGBM;
 using Microsoft.ML.Model;
 using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.TestFramework.Attributes;
+using Microsoft.ML.TestFrameworkCommon;
+using Microsoft.ML.TestFrameworkCommon.Attributes;
 using Microsoft.ML.Trainers;
 using Microsoft.ML.Trainers.Ensemble;
 using Microsoft.ML.Trainers.FastTree;
+using Microsoft.ML.Trainers.LightGbm;
 using Microsoft.ML.Transforms;
 using Microsoft.ML.Transforms.Text;
 using Microsoft.ML.Transforms.TimeSeries;
@@ -42,7 +43,7 @@ namespace Microsoft.ML.RunTests
 
         private IDataView GetBreastCancerDataView()
         {
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             return EntryPoints.ImportTextData.TextLoader(Env, new EntryPoints.ImportTextData.LoaderInput()
             {
@@ -62,13 +63,13 @@ namespace Microsoft.ML.RunTests
 
         private IDataView GetBreastCancerDataviewWithTextColumns()
         {
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             return EntryPoints.ImportTextData.TextLoader(Env, new EntryPoints.ImportTextData.LoaderInput()
             {
                 Arguments =
                 {
-                    HasHeader = true,
+                    HasHeader = false,
                     Columns = new[]
                     {
                         new TextLoader.Column("Label", DataKind.Single, 0),
@@ -134,7 +135,7 @@ namespace Microsoft.ML.RunTests
             var dataView = GetBreastCancerDataviewWithTextColumns();
             dataView = Env.CreateTransform("Term{col=F1}", dataView);
             var trainData = FeatureCombiner.PrepareFeatures(Env, new FeatureCombiner.FeatureCombinerInput() { Data = dataView, Features = new[] { "F1", "F2", "Rest" } });
-            var lrModel = LogisticRegression.TrainBinary(Env, new LogisticRegression.Options { TrainingData = trainData.OutputData }).PredictorModel;
+            var lrModel = LbfgsLogisticRegressionBinaryTrainer.TrainBinary(Env, new LbfgsLogisticRegressionBinaryTrainer.Options { TrainingData = trainData.OutputData }).PredictorModel;
             var model = ModelOperations.CombineTwoModels(Env, new ModelOperations.SimplePredictorModelInput() { TransformModel = trainData.Model, PredictorModel = lrModel }).PredictorModel;
 
             var scored1 = ScoreModel.Score(Env, new ScoreModel.Input() { Data = dataView, PredictorModel = model }).ScoredData;
@@ -327,10 +328,11 @@ namespace Microsoft.ML.RunTests
             Env.ComponentCatalog.RegisterAssembly(typeof(LightGbmBinaryModelParameters).Assembly);
             Env.ComponentCatalog.RegisterAssembly(typeof(TensorFlowTransformer).Assembly);
             Env.ComponentCatalog.RegisterAssembly(typeof(ImageLoadingTransformer).Assembly);
-            Env.ComponentCatalog.RegisterAssembly(typeof(SymbolicStochasticGradientDescentClassificationTrainer).Assembly);
+            Env.ComponentCatalog.RegisterAssembly(typeof(SymbolicSgdLogisticRegressionBinaryTrainer).Assembly);
             Env.ComponentCatalog.RegisterAssembly(typeof(SaveOnnxCommand).Assembly);
             Env.ComponentCatalog.RegisterAssembly(typeof(TimeSeriesProcessingEntryPoints).Assembly);
             Env.ComponentCatalog.RegisterAssembly(typeof(ParquetLoader).Assembly);
+            Env.ComponentCatalog.RegisterAssembly(typeof(DateTimeTransformer).Assembly);
 
             var catalog = Env.ComponentCatalog;
 
@@ -364,12 +366,12 @@ namespace Microsoft.ML.RunTests
         {
             var catalog = Env.ComponentCatalog;
 
-            InputBuilder ib1 = new InputBuilder(Env, typeof(LogisticRegression.Options), catalog);
+            InputBuilder ib1 = new InputBuilder(Env, typeof(LbfgsLogisticRegressionBinaryTrainer.Options), catalog);
             // Ensure that InputBuilder unwraps the Optional<string> correctly.
             var weightType = ib1.GetFieldTypeOrNull("ExampleWeightColumnName");
             Assert.True(weightType.Equals(typeof(string)));
 
-            var instance = ib1.GetInstance() as LogisticRegression.Options;
+            var instance = ib1.GetInstance() as LbfgsLogisticRegressionBinaryTrainer.Options;
             Assert.True(instance.ExampleWeightColumnName == null);
 
             ib1.TrySetValue("ExampleWeightColumnName", "OtherWeight");
@@ -422,14 +424,14 @@ namespace Microsoft.ML.RunTests
             for (int i = 0; i < nModels; i++)
             {
                 var data = splitOutput.TrainData[i];
-                var lrInput = new LogisticRegression.Options
+                var lrInput = new LbfgsLogisticRegressionBinaryTrainer.Options
                 {
                     TrainingData = data,
                     L1Regularization = (Single)0.1 * i,
                     L2Regularization = (Single)0.01 * (1 + i),
                     NormalizeFeatures = NormalizeOption.No
                 };
-                predictorModels[i] = LogisticRegression.TrainBinary(Env, lrInput).PredictorModel;
+                predictorModels[i] = LbfgsLogisticRegressionBinaryTrainer.TrainBinary(Env, lrInput).PredictorModel;
                 individualScores[i] =
                     ScoreModel.Score(Env,
                         new ScoreModel.Input { Data = splitOutput.TestData[nModels], PredictorModel = predictorModels[i] })
@@ -554,7 +556,7 @@ namespace Microsoft.ML.RunTests
             JObject graph = JObject.Parse(inputGraph);
             var runner = new GraphRunner(Env, graph[FieldNames.Nodes] as JArray);
 
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             runner.SetInput("file1", inputFile);
 
@@ -572,7 +574,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointExecGraphCommand()
         {
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var modelPath = DeleteOutputPath("model.zip");
 
             string inputGraph = string.Format(@"
@@ -612,6 +614,835 @@ namespace Microsoft.ML.RunTests
             var args = new ExecuteGraphCommand.Arguments() { GraphPath = jsonPath };
             var cmd = new ExecuteGraphCommand(Env, args);
             cmd.Run();
+        }
+
+        [Fact]
+        public void BinaryPermutationFeatureImportance()
+        {
+            var inputDataPath = GetDataPath("adult.tiny.with-schema.txt");
+            var outputDataPath = DeleteOutputPath("binary_pfi_metrics.idv");
+
+            string inputGraph = string.Format(@"
+                {{
+                  'Inputs': {{
+                    'file': '{0}'
+                  }},
+                  'Nodes': [
+                    {{
+                      'Name': 'Data.CustomTextLoader',
+                      'Inputs': {{
+                        'CustomSchema': 'col=Label:I8:0 col=Workclass:TX:1 col=education:TX:2 col=marital-status:TX:3 col=occupation:TX:4 col=relationship:TX:5 col=ethnicity:TX:6 col=sex:TX:7 col=native-country-region:TX:8 col=age:I8:9 col=fnlwgt:I8:10 col=education-num:I8:11 col=capital-gain:I8:12 col=capital-loss:I8:13 col=hours-per-week:I8:14 quote+ header=+ sep=tab',
+                        'InputFile': '$file'
+                      }},
+                      'Outputs': {{
+                        'Data': '$data'
+                      }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                {{
+                                    'Name': 'education',
+                                    'Source': 'education'
+                                }}
+                            ],
+                            'Data': '$data'
+                        }},
+                        'Name': 'Transforms.CategoricalOneHotVectorizer',
+                        'Outputs': {{
+                            'Model': '$output_model1',
+                            'OutputData': '$output_data1'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                'Label'
+                            ],
+                            'Data': '$output_data1'
+                        }},
+                        'Name': 'Transforms.OptionalColumnCreator',
+                        'Outputs': {{
+                            'Model': '$output_model2',
+                            'OutputData': '$output_data2'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data2',
+                            'LabelColumn': 'Label',
+                            'TextKeyValues': false
+                        }},
+                        'Name': 'Transforms.LabelColumnKeyBooleanConverter',
+                        'Outputs': {{
+                            'Model': '$output_model3',
+                            'OutputData': '$output_data3'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data3',
+                            'Features': [
+                                'age',
+                                'education'
+                            ]
+                        }},
+                        'Name': 'Transforms.FeatureCombiner',
+                        'Outputs': {{
+                            'Model': '$output_model4',
+                            'OutputData': '$output_data4'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'MaximumNumberOfIterations': 1,
+                            'NumThreads': 1,
+                            'TrainingData': '$output_data4'
+                        }},
+                        'Name': 'Trainers.LogisticRegressionBinaryClassifier',
+                        'Outputs': {{
+                            'PredictorModel': '$predictor_model'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'PredictorModel': '$predictor_model',
+                            'TransformModels': [
+                                '$output_model1',
+                                '$output_model2',
+                                '$output_model3',
+                                '$output_model4'
+                            ]
+                        }},
+                        'Name': 'Transforms.ManyHeterogeneousModelCombiner',
+                        'Outputs': {{
+                            'PredictorModel': '$output_model'
+                        }}
+                    }},
+                    {{
+                      'Name': 'Transforms.PermutationFeatureImportance',
+                      'Inputs': {{
+                        'Data': '$data',
+                        'PredictorModel': '$output_model',
+                        'PermutationCount': 5
+                      }},
+                      'Outputs': {{
+                        'Metrics': '$output_data'
+                      }}
+                    }}
+                  ],
+                  'Outputs': {{
+                    'output_data': '{1}'
+                  }}
+                }}", EscapePath(inputDataPath), EscapePath(outputDataPath));
+
+            var jsonPath = DeleteOutputPath("graph.json");
+            File.WriteAllLines(jsonPath, new[] { inputGraph });
+
+            var args = new ExecuteGraphCommand.Arguments() { GraphPath = jsonPath };
+            var cmd = new ExecuteGraphCommand(Env, args);
+            cmd.Run();
+
+            var mlContext = new MLContext(1);
+            var loadedData = mlContext.Data.LoadFromBinary(outputDataPath);
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("FeatureName"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("AreaUnderRocCurve"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("Accuracy"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PositivePrecision"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PositiveRecall"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("NegativePrecision"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("NegativeRecall"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("F1Score"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("AreaUnderPrecisionRecallCurve"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("AreaUnderRocCurveStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("AccuracyStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PositivePrecisionStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PositiveRecallStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("NegativePrecisionStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("NegativeRecallStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("F1ScoreStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("AreaUnderPrecisionRecallCurveStdErr"));
+        }
+
+        [Fact]
+        public void MulticlassPermutationFeatureImportance()
+        {
+            var inputDataPath = GetDataPath("adult.tiny.with-schema.txt");
+            var outputDataPath = DeleteOutputPath("mc_pfi_metrics.idv");
+
+            string inputGraph = string.Format(@"
+                {{
+                  'Inputs': {{
+                    'file': '{0}'
+                  }},
+                  'Nodes': [
+                    {{
+                      'Name': 'Data.CustomTextLoader',
+                      'Inputs': {{
+                        'CustomSchema': 'col=Label:I8:0 col=Workclass:TX:1 col=education:TX:2 col=marital-status:TX:3 col=occupation:TX:4 col=relationship:TX:5 col=ethnicity:TX:6 col=sex:TX:7 col=native-country-region:TX:8 col=age:I8:9 col=fnlwgt:I8:10 col=education-num:I8:11 col=capital-gain:I8:12 col=capital-loss:I8:13 col=hours-per-week:I8:14 quote+ header=+ sep=tab',
+                        'InputFile': '$file'
+                      }},
+                      'Outputs': {{
+                        'Data': '$data'
+                      }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                {{
+                                    'Name': 'education',
+                                    'Source': 'education'
+                                }}
+                            ],
+                            'Data': '$data',
+                        }},
+                        'Name': 'Transforms.CategoricalOneHotVectorizer',
+                        'Outputs': {{
+                            'Model': '$output_model1',
+                            'OutputData': '$output_data1'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                'Label'
+                            ],
+                            'Data': '$output_data1'
+                        }},
+                        'Name': 'Transforms.OptionalColumnCreator',
+                        'Outputs': {{
+                            'Model': '$output_model2',
+                            'OutputData': '$output_data2'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data2',
+                            'LabelColumn': 'Label',
+                            'TextKeyValues': false
+                        }},
+                        'Name': 'Transforms.LabelColumnKeyBooleanConverter',
+                        'Outputs': {{
+                            'Model': '$output_model3',
+                            'OutputData': '$output_data3'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data3',
+                            'Features': [
+                                'age',
+                                'education'
+                            ]
+                        }},
+                        'Name': 'Transforms.FeatureCombiner',
+                        'Outputs': {{
+                            'Model': '$output_model4',
+                            'OutputData': '$output_data4'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'TrainingData': '$output_data4',
+                            'NumThreads': 1,
+                            'MaxIterations': 1
+                        }},
+                        'Name': 'Trainers.StochasticDualCoordinateAscentClassifier',
+                        'Outputs': {{
+                            'PredictorModel': '$predictor_model'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'PredictorModel': '$predictor_model',
+                            'TransformModels': [
+                                '$output_model1',
+                                '$output_model2',
+                                '$output_model3',
+                                '$output_model4'
+                            ]
+                        }},
+                        'Name': 'Transforms.ManyHeterogeneousModelCombiner',
+                        'Outputs': {{
+                            'PredictorModel': '$output_model'
+                        }}
+                    }},
+                    {{
+                      'Name': 'Transforms.PermutationFeatureImportance',
+                      'Inputs': {{
+                        'Data': '$data',
+                        'PredictorModel': '$output_model',
+                        'PermutationCount': 5
+                      }},
+                      'Outputs': {{
+                        'Metrics': '$output_data'
+                      }}
+                    }}
+                  ],
+                  'Outputs': {{
+                    'output_data': '{1}'
+                  }}
+                }}", EscapePath(inputDataPath), EscapePath(outputDataPath));
+
+            var jsonPath = DeleteOutputPath("graph.json");
+            File.WriteAllLines(jsonPath, new[] { inputGraph });
+
+            var args = new ExecuteGraphCommand.Arguments() { GraphPath = jsonPath };
+            var cmd = new ExecuteGraphCommand(Env, args);
+            cmd.Run();
+
+            var mlContext = new MLContext(1);
+            var loadedData = mlContext.Data.LoadFromBinary(outputDataPath);
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("FeatureName"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MacroAccuracy"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MicroAccuracy"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LogLoss"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LogLossReduction"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("TopKAccuracy"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PerClassLogLoss"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MacroAccuracyStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MicroAccuracyStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LogLossStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LogLossReductionStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("TopKAccuracyStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PerClassLogLossStdErr"));
+        }
+
+        [Fact]
+        public void MulticlassPermutationFeatureImportanceWithKeyToValue()
+        {
+            var inputData = GetDataPath("adult.tiny.with-schema.txt");
+            var outputDataPath = DeleteOutputPath("mc_ktv_pfi_metrics.idv");
+
+            string inputGraph = string.Format(@"
+                {{
+                  'Inputs': {{
+                    'file': '{0}'
+                  }},
+                  'Nodes': [
+                    {{
+                      'Name': 'Data.CustomTextLoader',
+                      'Inputs': {{
+                        'CustomSchema': 'col=Label:I8:0 col=Workclass:TX:1 col=education:TX:2 col=marital-status:TX:3 col=occupation:TX:4 col=relationship:TX:5 col=ethnicity:TX:6 col=sex:TX:7 col=native-country-region:TX:8 col=age:I8:9 col=fnlwgt:I8:10 col=education-num:I8:11 col=capital-gain:I8:12 col=capital-loss:I8:13 col=hours-per-week:I8:14 quote+ header=+ sep=tab',
+                        'InputFile': '$file'
+                      }},
+                      'Outputs': {{
+                        'Data': '$data'
+                      }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                {{
+                                    'Name': 'education',
+                                    'Source': 'education'
+                                }}
+                            ],
+                            'Data': '$data',
+                        }},
+                        'Name': 'Transforms.CategoricalOneHotVectorizer',
+                        'Outputs': {{
+                            'Model': '$output_model1',
+                            'OutputData': '$output_data1'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                'Label'
+                            ],
+                            'Data': '$output_data1'
+                        }},
+                        'Name': 'Transforms.OptionalColumnCreator',
+                        'Outputs': {{
+                            'Model': '$output_model2',
+                            'OutputData': '$output_data2'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data2',
+                            'LabelColumn': 'Label',
+                            'TextKeyValues': false
+                        }},
+                        'Name': 'Transforms.LabelColumnKeyBooleanConverter',
+                        'Outputs': {{
+                            'Model': '$output_model3',
+                            'OutputData': '$output_data3'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data3',
+                            'Features': [
+                                'age',
+                                'education'
+                            ]
+                        }},
+                        'Name': 'Transforms.FeatureCombiner',
+                        'Outputs': {{
+                            'Model': '$output_model4',
+                            'OutputData': '$output_data4'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'TrainingData': '$output_data4',
+                            'NumThreads': 1,
+                            'MaxIterations': 1
+                        }},
+                        'Name': 'Trainers.StochasticDualCoordinateAscentClassifier',
+                        'Outputs': {{
+                            'PredictorModel': '$predictor_model'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data4',
+                            'Column': [
+                                {{
+                                    'Name': 'Label',
+                                    'Source': 'Label'
+                                }}
+                            ],
+                        }},
+                        'Name': 'Transforms.TextToKeyConverter',
+                        'Outputs': {{
+                            'Model': '$output_model5',
+                            'OutputData': '$output_data5'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'PredictorModel': '$predictor_model',
+                            'TransformModels': [
+                                '$output_model1',
+                                '$output_model2',
+                                '$output_model3',
+                                '$output_model4',
+                                '$output_model5'
+                            ]
+                        }},
+                        'Name': 'Transforms.ManyHeterogeneousModelCombiner',
+                        'Outputs': {{
+                            'PredictorModel': '$output_model'
+                        }}
+                    }},
+                    {{
+                      'Name': 'Transforms.PermutationFeatureImportance',
+                      'Inputs': {{
+                        'Data': '$data',
+                        'PredictorModel': '$output_model',
+                        'PermutationCount': 5
+                      }},
+                      'Outputs': {{
+                        'Metrics': '$output_data'
+                      }}
+                    }}
+                  ],
+                  'Outputs': {{
+                    'output_data': '{1}'
+                  }}
+                }}", EscapePath(inputData), EscapePath(outputDataPath));
+
+            var jsonPath = DeleteOutputPath("graph.json");
+            File.WriteAllLines(jsonPath, new[] { inputGraph });
+
+            var args = new ExecuteGraphCommand.Arguments() { GraphPath = jsonPath };
+            var cmd = new ExecuteGraphCommand(Env, args);
+            cmd.Run();
+
+            var mlContext = new MLContext(1);
+            var loadedData = mlContext.Data.LoadFromBinary(outputDataPath);
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("FeatureName"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MacroAccuracy"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MicroAccuracy"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LogLoss"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LogLossReduction"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("TopKAccuracy"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PerClassLogLoss"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MacroAccuracyStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MicroAccuracyStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LogLossStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LogLossReductionStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("TopKAccuracyStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PerClassLogLossStdErr"));
+        }
+
+        [Fact]
+        public void RegressionPermutationFeatureImportance()
+        {
+            var inputDataPath = GetDataPath("adult.tiny.with-schema.txt");
+            var outputDataPath = DeleteOutputPath("reg_pfi_metrics.idv");
+
+            string inputGraph = string.Format(@"
+                {{
+                  'Inputs': {{
+                    'file': '{0}'
+                  }},
+                  'Nodes': [
+                    {{
+                      'Name': 'Data.CustomTextLoader',
+                      'Inputs': {{
+                        'CustomSchema': 'col=Label:I8:0 col=Workclass:TX:1 col=education:TX:2 col=marital-status:TX:3 col=occupation:TX:4 col=relationship:TX:5 col=ethnicity:TX:6 col=sex:TX:7 col=native-country-region:TX:8 col=age:I8:9 col=fnlwgt:I8:10 col=education-num:I8:11 col=capital-gain:I8:12 col=capital-loss:I8:13 col=hours-per-week:I8:14 quote+ header=+ sep=tab',
+                        'InputFile': '$file'
+                      }},
+                      'Outputs': {{
+                        'Data': '$data'
+                      }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                {{
+                                    'Name': 'education',
+                                    'Source': 'education'
+                                }}
+                            ],
+                            'Data': '$data',
+                        }},
+                        'Name': 'Transforms.CategoricalOneHotVectorizer',
+                        'Outputs': {{
+                            'Model': '$output_model1',
+                            'OutputData': '$output_data1'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                'Label'
+                            ],
+                            'Data': '$output_data1'
+                        }},
+                        'Name': 'Transforms.OptionalColumnCreator',
+                        'Outputs': {{
+                            'Model': '$output_model2',
+                            'OutputData': '$output_data2'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data2',
+                            'LabelColumn': 'Label'
+                        }},
+                        'Name': 'Transforms.LabelToFloatConverter',
+                        'Outputs': {{
+                            'Model': '$output_model3',
+                            'OutputData': '$output_data3'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data3',
+                            'Features': [
+                                'age',
+                                'education'
+                            ]
+                        }},
+                        'Name': 'Transforms.FeatureCombiner',
+                        'Outputs': {{
+                            'Model': '$output_model4',
+                            'OutputData': '$output_data4'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'TrainingData': '$output_data4',
+                            'NumThreads': 1,
+                            'MaxIterations': 1
+                        }},
+                        'Name': 'Trainers.StochasticDualCoordinateAscentRegressor',
+                        'Outputs': {{
+                            'PredictorModel': '$predictor_model'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'PredictorModel': '$predictor_model',
+                            'TransformModels': [
+                                '$output_model1',
+                                '$output_model2',
+                                '$output_model3',
+                                '$output_model4'
+                            ]
+                        }},
+                        'Name': 'Transforms.ManyHeterogeneousModelCombiner',
+                        'Outputs': {{
+                            'PredictorModel': '$output_model'
+                        }}
+                    }},
+                    {{
+                      'Name': 'Transforms.PermutationFeatureImportance',
+                      'Inputs': {{
+                        'Data': '$data',
+                        'PredictorModel': '$output_model',
+                        'PermutationCount': 5
+                      }},
+                      'Outputs': {{
+                        'Metrics': '$output_data'
+                      }}
+                    }}
+                  ],
+                  'Outputs': {{
+                    'output_data': '{1}'
+                  }}
+                }}", EscapePath(inputDataPath), EscapePath(outputDataPath));
+
+            var jsonPath = DeleteOutputPath("graph.json");
+            File.WriteAllLines(jsonPath, new[] { inputGraph });
+
+            var args = new ExecuteGraphCommand.Arguments() { GraphPath = jsonPath };
+            var cmd = new ExecuteGraphCommand(Env, args);
+            cmd.Run();
+                        
+            var mlContext = new MLContext(1);
+            var loadedData = mlContext.Data.LoadFromBinary(outputDataPath);
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("FeatureName"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MeanAbsoluteError"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MeanSquaredError"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("RootMeanSquaredError"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LossFunction"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("RSquared"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MeanAbsoluteErrorStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("MeanSquaredErrorStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("RootMeanSquaredErrorStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("LossFunctionStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("RSquaredStdErr"));
+        }
+
+        [Fact]
+        public void RankingPermutationFeatureImportance()
+        {
+            var inputData = GetDataPath("adult.tiny.with-schema.txt");
+            var outputDataPath = DeleteOutputPath("rank_pfi_metrics.idv");
+
+            string inputGraph = string.Format(@"
+                {{
+                  'Inputs': {{
+                    'file': '{0}'
+                  }},
+                  'Nodes': [
+                    {{
+                        'Inputs': {{
+                            'CustomSchema': 'col=Label:I8:0 col=Workclass:TX:1 col=education:TX:2 col=marital-status:TX:3 col=occupation:TX:4 col=relationship:TX:5 col=ethnicity:TX:6 col=sex:TX:7 col=native-country-region:TX:8 col=age:I8:9 col=fnlwgt:I8:10 col=education-num:I8:11 col=capital-gain:I8:12 col=capital-loss:I8:13 col=hours-per-week:I8:14 quote+ header=+ sep=tab',
+                            'InputFile': '$file'
+                        }},
+                        'Name': 'Data.CustomTextLoader',
+                        'Outputs': {{
+                            'Data': '$input_data'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                {{
+                                    'Name': 'Workclass',
+                                    'Source': 'Workclass'
+                                }}
+                            ],
+                            'Data': '$input_data',
+                            'MaxNumTerms': 1000000,
+                            'Sort': 'ByOccurrence',
+                            'TextKeyValues': false
+                        }},
+                        'Name': 'Transforms.TextToKeyConverter',
+                        'Outputs': {{
+                            'Model': '$output_model1',
+                            'OutputData': '$output_data1'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Column': [
+                                'Label'
+                            ],
+                            'Data': '$output_data1'
+                        }},
+                        'Name': 'Transforms.OptionalColumnCreator',
+                        'Outputs': {{
+                            'Model': '$output_model2',
+                            'OutputData': '$output_data2'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data2',
+                            'LabelColumn': 'Label',
+                            'TextKeyValues': false
+                        }},
+                        'Name': 'Transforms.LabelColumnKeyBooleanConverter',
+                        'Outputs': {{
+                            'Model': '$output_model3',
+                            'OutputData': '$output_data3'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'Data': '$output_data3',
+                            'Features': [
+                                'age',
+                                'education-num',
+                                'capital-gain'
+                            ]
+                        }},
+                        'Name': 'Transforms.FeatureCombiner',
+                        'Outputs': {{
+                            'Model': '$output_model4',
+                            'OutputData': '$output_data4'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'NumberOfTrees': 1,
+                            'RowGroupColumnName': 'Workclass',
+                            'TrainingData': '$output_data4',
+                            'NumberOfLeaves': 2
+                        }},
+                        'Name': 'Trainers.FastTreeRanker',
+                        'Outputs': {{
+                            'PredictorModel': '$predictor_model'
+                        }}
+                    }},
+                    {{
+                        'Inputs': {{
+                            'PredictorModel': '$predictor_model',
+                            'TransformModels': [
+                                '$output_model1',
+                                '$output_model2',
+                                '$output_model3',
+                                '$output_model4'
+                            ]
+                        }},
+                        'Name': 'Transforms.ManyHeterogeneousModelCombiner',
+                        'Outputs': {{
+                            'PredictorModel': '$output_model'
+                        }}
+                    }},
+                    {{
+                      'Name': 'Transforms.PermutationFeatureImportance',
+                      'Inputs': {{
+                        'Data': '$input_data',
+                        'PredictorModel': '$output_model',
+                        'PermutationCount': 5
+                      }},
+                      'Outputs': {{
+                        'Metrics': '$output_data'
+                      }}
+                    }}
+                  ],
+                  'Outputs': {{
+                    'output_data': '{1}'
+                  }}
+                }}", EscapePath(inputData), EscapePath(outputDataPath));
+
+            var jsonPath = DeleteOutputPath("trainingGraph.json");
+            File.WriteAllLines(jsonPath, new[] { inputGraph });
+
+            var args = new ExecuteGraphCommand.Arguments() { GraphPath = jsonPath };
+            var cmd = new ExecuteGraphCommand(Env, args);
+            cmd.Run();
+
+            var mlContext = new MLContext(1);
+            var loadedData = mlContext.Data.LoadFromBinary(outputDataPath);
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("FeatureName"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("DiscountedCumulativeGains"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("NormalizedDiscountedCumulativeGains"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("DiscountedCumulativeGainsStdErr"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("NormalizedDiscountedCumulativeGainsStdErr"));
+        }
+
+        [Fact]
+        public void ScoreTransformerChainModel()
+        {
+            var dataPath = GetDataPath("wikipedia-detox-250-line-data.tsv");
+            var modelPath = DeleteOutputPath("score_model.zip");
+            var outputDataPath = DeleteOutputPath("scored.idv");
+
+            var mlContext = new MLContext(1);
+
+            var data = new TextLoader(mlContext,
+                    new TextLoader.Options()
+                    {
+                        AllowQuoting = true,
+                        Separator = "\t",
+                        HasHeader = true,
+                        Columns = new[]
+                        {
+                            new TextLoader.Column("Label", DataKind.Boolean, 0),
+                            new TextLoader.Column("SentimentText", DataKind.String, 1)
+                        }
+                    }).Load(dataPath);
+
+            var pipeline = mlContext.Transforms.Text.FeaturizeText("Features", "SentimentText")
+                .Append(mlContext.BinaryClassification.Trainers.AveragedPerceptron());
+
+            var model = pipeline.Fit(data);
+
+            mlContext.Model.Save(model, data.Schema, modelPath);
+
+            string inputGraph = string.Format(@"
+                {{
+                  'Inputs': {{
+                    'file': '{0}',
+                    'transform_model': '{1}'
+                  }},
+                  'Nodes': [
+                    {{
+                      'Name': 'Data.CustomTextLoader',
+                      'Inputs': {{
+                        'CustomSchema': 'col=Sentiment:I8:0 col=SentimentText:TX:1 quote+ header=+ sep=tab',
+                        'InputFile': '$file'
+                      }},
+                      'Outputs': {{
+                        'Data': '$data'
+                      }}
+                    }},
+                    {{
+                      'Name': 'Transforms.DatasetTransformScorer',
+                      'Inputs': {{
+                        'Data': '$data',
+                        'TransformModel': '$transform_model'
+                      }},
+                      'Outputs': {{
+                        'ScoredData': '$scoredVectorData'
+                      }}
+                    }},
+                    {{
+                      'Inputs': {{
+                        'Data': '$scoredVectorData'
+                      }},
+                      'Name': 'Transforms.ScoreColumnSelector',
+                      'Outputs': {{
+                        'OutputData': '$scoreColumnsOnlyData'
+                      }}
+                    }},
+                    {{
+                      'Inputs': {{
+                        'Data': '$scoreColumnsOnlyData',
+                        'PredictedLabelColumn': 'PredictedLabel'
+                      }},
+                      'Name': 'Transforms.PredictedLabelColumnOriginalValueConverter',
+                      'Outputs': {{
+                        'OutputData': '$output_data'
+                      }}
+                    }}
+                  ],
+                  'Outputs': {{
+                    'output_data': '{2}'
+                  }}
+                }}", EscapePath(dataPath), EscapePath(modelPath), EscapePath(outputDataPath));
+
+            var jsonPath = DeleteOutputPath("graph.json");
+            File.WriteAllLines(jsonPath, new[] { inputGraph });
+
+            var args = new ExecuteGraphCommand.Arguments() { GraphPath = jsonPath };
+            var cmd = new ExecuteGraphCommand(Env, args);
+            cmd.Run();
+
+            var loadedData = mlContext.Data.LoadFromBinary(outputDataPath);
+
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("PredictedLabel"));
+            Assert.NotNull(loadedData.Schema.GetColumnOrNull("Score"));
         }
 
         //[Fact]
@@ -678,7 +1509,7 @@ namespace Microsoft.ML.RunTests
 
             var splitOutput = CVSplit.Split(Env, new CVSplit.Input { Data = dataView, NumFolds = 3 });
 
-            var lrModel = LogisticRegression.TrainBinary(Env, new LogisticRegression.Options { TrainingData = splitOutput.TestData[0] }).PredictorModel;
+            var lrModel = LbfgsLogisticRegressionBinaryTrainer.TrainBinary(Env, new LbfgsLogisticRegressionBinaryTrainer.Options { TrainingData = splitOutput.TestData[0] }).PredictorModel;
             var calibratedLrModel = Calibrate.FixedPlatt(Env,
                 new Calibrate.FixedPlattInput { Data = splitOutput.TestData[1], UncalibratedPredictorModel = lrModel }).PredictorModel;
 
@@ -697,7 +1528,7 @@ namespace Microsoft.ML.RunTests
             calibratedLrModel = Calibrate.Pav(Env, input).PredictorModel;
 
             // This tests that the SchemaBindableCalibratedPredictor doesn't get confused if its sub-predictor is already calibrated.
-            var fastForest = new FastForestClassification(Env, "Label", "Features");
+            var fastForest = new FastForestBinaryTrainer(Env, "Label", "Features");
             var rmd = new RoleMappedData(splitOutput.TrainData[0], "Label", "Features");
             var ffModel = new PredictorModelImpl(Env, rmd, splitOutput.TrainData[0], fastForest.Train(rmd));
             var calibratedFfModel = Calibrate.Platt(Env,
@@ -705,6 +1536,7 @@ namespace Microsoft.ML.RunTests
             var twiceCalibratedFfModel = Calibrate.Platt(Env,
                 new Calibrate.NoArgumentsInput() { Data = splitOutput.TestData[0], UncalibratedPredictorModel = calibratedFfModel }).PredictorModel;
             var scoredFf = ScoreModel.Score(Env, new ScoreModel.Input() { Data = splitOutput.TestData[2], PredictorModel = twiceCalibratedFfModel }).ScoredData;
+            Done();
         }
 
         [Fact]
@@ -718,22 +1550,22 @@ namespace Microsoft.ML.RunTests
             for (int i = 0; i < nModels; i++)
             {
                 var data = splitOutput.TrainData[i];
-                data = new RandomFourierKernelMappingEstimator(Env, new[] {
-                    new RandomFourierKernelMappingEstimator.ColumnOptions("Features1", 10, false, "Features"),
-                    new RandomFourierKernelMappingEstimator.ColumnOptions("Features2", 10, false, "Features"),
+                data = new ApproximatedKernelMappingEstimator(Env, new[] {
+                    new ApproximatedKernelMappingEstimator.ColumnOptions("Features1", 10, false, "Features"),
+                    new ApproximatedKernelMappingEstimator.ColumnOptions("Features2", 10, false, "Features"),
                 }).Fit(data).Transform(data);
 
                 data = new ColumnConcatenatingTransformer(Env, "Features", new[] { "Features1", "Features2" }).Transform(data);
-                data = new ValueToKeyMappingEstimator(Env, "Label", "Label", sort: ValueToKeyMappingEstimator.SortOrder.Value).Fit(data).Transform(data);
+                data = new ValueToKeyMappingEstimator(Env, "Label", "Label", keyOrdinality: ValueToKeyMappingEstimator.KeyOrdinality.ByValue).Fit(data).Transform(data);
 
-                var lrInput = new LogisticRegression.Options
+                var lrInput = new LbfgsLogisticRegressionBinaryTrainer.Options
                 {
                     TrainingData = data,
                     L1Regularization = (Single)0.1 * i,
                     L2Regularization = (Single)0.01 * (1 + i),
                     NormalizeFeatures = NormalizeOption.Yes
                 };
-                predictorModels[i] = LogisticRegression.TrainBinary(Env, lrInput).PredictorModel;
+                predictorModels[i] = LbfgsLogisticRegressionBinaryTrainer.TrainBinary(Env, lrInput).PredictorModel;
                 var transformModel = new TransformModelImpl(Env, data, splitOutput.TrainData[i]);
 
                 predictorModels[i] = ModelOperations.CombineTwoModels(Env,
@@ -972,9 +1804,9 @@ namespace Microsoft.ML.RunTests
                 var data = splitOutput.TrainData[i];
                 if (i % 2 == 0)
                 {
-                    data = new TextFeaturizingEstimator(Env, "Features", new List<string> { "Text" }, 
-                        new TextFeaturizingEstimator.Options { 
-                            UseStopRemover = true,
+                    data = new TextFeaturizingEstimator(Env, "Features", new List<string> { "Text" },
+                        new TextFeaturizingEstimator.Options {
+                            StopWordsRemoverOptions = new StopWordsRemovingEstimator.Options(),
                         }).Fit(data).Transform(data);
                 }
                 else
@@ -983,18 +1815,22 @@ namespace Microsoft.ML.RunTests
                         new WordHashBagProducingTransformer.Options()
                         {
                             Columns =
-                                new[] { new WordHashBagProducingTransformer.Column() { Name = "Features", Source = new[] { "Text" } }, }
+                                new[]
+                                {
+                                    new WordHashBagProducingTransformer.Column()
+                                        {Name = "Features", Source = new[] {"Text"}},
+                                }
                         },
                         data);
                 }
-                var lrInput = new LogisticRegression.Options
+                var lrInput = new LbfgsLogisticRegressionBinaryTrainer.Options
                 {
                     TrainingData = data,
                     L1Regularization = (Single)0.1 * i,
                     L2Regularization = (Single)0.01 * (1 + i),
                     NormalizeFeatures = NormalizeOption.Yes
                 };
-                predictorModels[i] = LogisticRegression.TrainBinary(Env, lrInput).PredictorModel;
+                predictorModels[i] = LbfgsLogisticRegressionBinaryTrainer.TrainBinary(Env, lrInput).PredictorModel;
                 var transformModel = new TransformModelImpl(Env, data, splitOutput.TrainData[i]);
 
                 predictorModels[i] = ModelOperations.CombineTwoModels(Env,
@@ -1170,13 +2006,13 @@ namespace Microsoft.ML.RunTests
             for (int i = 0; i < nModels; i++)
             {
                 var data = splitOutput.TrainData[i];
-                data = new RandomFourierKernelMappingEstimator(Env, new[] {
-                    new RandomFourierKernelMappingEstimator.ColumnOptions("Features1", 10, false, "Features"),
-                    new RandomFourierKernelMappingEstimator.ColumnOptions("Features2", 10, false, "Features"),
+                data = new ApproximatedKernelMappingEstimator(Env, new[] {
+                    new ApproximatedKernelMappingEstimator.ColumnOptions("Features1", 10, false, "Features"),
+                    new ApproximatedKernelMappingEstimator.ColumnOptions("Features2", 10, false, "Features"),
                 }).Fit(data).Transform(data);
                 data = new ColumnConcatenatingTransformer(Env, "Features", new[] { "Features1", "Features2" }).Transform(data);
 
-                var mlr = ML.MulticlassClassification.Trainers.LogisticRegression();
+                var mlr = ML.MulticlassClassification.Trainers.LbfgsMaximumEntropy();
                 var rmd = new RoleMappedData(data, "Label", "Features");
 
                 predictorModels[i] = new PredictorModelImpl(Env, rmd, data, mlr.Train(rmd));
@@ -1192,7 +2028,7 @@ namespace Microsoft.ML.RunTests
                         .ScoredData;
             }
 
-            var mcEnsembleModel = EnsembleCreator.CreateMultiClassPipelineEnsemble(Env,
+            var mcEnsembleModel = EnsembleCreator.CreateMulticlassPipelineEnsemble(Env,
                 new EnsembleCreator.PipelineClassifierInput()
                 {
                     ModelCombiner = EnsembleCreator.ClassifierCombiner.Average,
@@ -1287,7 +2123,7 @@ namespace Microsoft.ML.RunTests
             }
         }
 
-        [LessThanNetCore30OrNotNetCoreFact("netcoreapp3.0 output differs from Baseline")]
+        [Fact]
         public void EntryPointPipelineEnsembleGetSummary()
         {
             var dataPath = GetDataPath("breast-cancer-withheader.txt");
@@ -1320,7 +2156,7 @@ namespace Microsoft.ML.RunTests
                 data = new ColumnConcatenatingTransformer(Env, new ColumnConcatenatingTransformer.ColumnOptions("Features", i % 2 == 0 ? new[] { "Features", "Cat" } : new[] { "Cat", "Features" })).Transform(data);
                 if (i % 2 == 0)
                 {
-                    var lrInput = new LogisticRegression.Options
+                    var lrInput = new LbfgsLogisticRegressionBinaryTrainer.Options
                     {
                         TrainingData = data,
                         NormalizeFeatures = NormalizeOption.Yes,
@@ -1328,7 +2164,7 @@ namespace Microsoft.ML.RunTests
                         ShowTrainingStatistics = true,
                         ComputeStandardDeviation = new ComputeLRTrainingStdThroughMkl()
                     };
-                    predictorModels[i] = LogisticRegression.TrainBinary(Env, lrInput).PredictorModel;
+                    predictorModels[i] = LbfgsLogisticRegressionBinaryTrainer.TrainBinary(Env, lrInput).PredictorModel;
                     var transformModel = new TransformModelImpl(Env, data, splitOutput.TrainData[i]);
 
                     predictorModels[i] = ModelOperations.CombineTwoModels(Env,
@@ -1337,7 +2173,14 @@ namespace Microsoft.ML.RunTests
                 }
                 else if (i % 2 == 1)
                 {
-                    var trainer = new FastTreeBinaryClassificationTrainer(Env, "Label", "Features");
+                    var ftInput = new FastTreeBinaryTrainer.Options
+                    {
+                        NumberOfThreads = 1,
+                        NumberOfLeaves = 5,
+                        NumberOfTrees = 2
+                    };
+
+                    var trainer = new FastTreeBinaryTrainer(Env, ftInput);
                     var rmd = new RoleMappedData(data, false,
                         RoleMappedSchema.CreatePair(RoleMappedSchema.ColumnRole.Feature, "Features"),
                         RoleMappedSchema.CreatePair(RoleMappedSchema.ColumnRole.Label, "Label"));
@@ -1438,7 +2281,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointParseColumns()
         {
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var outputPath = DeleteOutputPath("data.idv");
 
             string inputGraph = string.Format(@"
@@ -1487,9 +2330,59 @@ namespace Microsoft.ML.RunTests
         }
 
         [Fact]
+        public void RobustScalerNormalizerEntryPoint()
+        {
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
+            var outputPath = DeleteOutputPath("data.idv");
+
+            string inputGraph = string.Format(@"
+                {{
+                  'Nodes': [
+                    {{
+                      'Name': 'Data.CustomTextLoader',
+                      'Inputs': {{
+                        'InputFile': '$file1'
+                      }},
+                      'Outputs': {{
+                        'Data': '$data1'
+                      }}
+                    }},
+                    {{
+                      'Name': 'Transforms.RobustScalingNormalizer',
+                      'Inputs': {{
+                        'Data': '$data1',
+                        'Column': [
+                          {{
+                            'Name': 'Features',
+                            'Source': 'Features'
+                          }}
+                        ]
+                      }},
+                      'Outputs': {{
+                        'OutputData': '$data2'
+                      }}
+                    }}
+                  ],
+                  'Inputs' : {{
+                    'file1' : '{0}'
+                  }},
+                  'Outputs' : {{
+                    'data2' : '{1}'
+                  }}
+                }}", EscapePath(dataPath), EscapePath(outputPath));
+
+            var jsonPath = DeleteOutputPath("graph.json");
+            File.WriteAllLines(jsonPath, new[] { inputGraph });
+
+            var args = new ExecuteGraphCommand.Arguments() { GraphPath = jsonPath };
+            var cmd = new ExecuteGraphCommand(Env, args);
+            cmd.Run();
+        }
+
+        [Fact]
         public void EntryPointCountFeatures()
         {
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var outputPath = DeleteOutputPath("data.idv");
             string inputGraph = string.Format(@"
                 {{
@@ -1534,7 +2427,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointMutualSelectFeatures()
         {
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var outputPath = DeleteOutputPath("data.idv");
             string inputGraph = string.Format(@"
                 {{
@@ -1750,7 +2643,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointEvaluateBinary()
         {
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var warningsPath = DeleteOutputPath("warnings.idv");
             var overallMetricsPath = DeleteOutputPath("overall.idv");
             var instanceMetricsPath = DeleteOutputPath("instance.idv");
@@ -1772,7 +2665,7 @@ namespace Microsoft.ML.RunTests
         }
 
         [Fact]
-        public void EntryPointEvaluateMultiClass()
+        public void EntryPointEvaluateMulticlass()
         {
             var dataPath = GetDataPath("iris.txt");
             var warningsPath = DeleteOutputPath("warnings.idv");
@@ -1835,7 +2728,7 @@ namespace Microsoft.ML.RunTests
                             ],
                             'Data': '$AllData',
                             'MaxNumTerms': 1000000,
-                            'Sort': 'Occurrence',
+                            'Sort': 'ByOccurrence',
                             'TextKeyValues': false
                         },
                         'Name': 'Transforms.TextToKeyConverter',
@@ -1899,7 +2792,7 @@ namespace Microsoft.ML.RunTests
         }
 
         [LightGBMFact]
-        public void EntryPointLightGbmMultiClass()
+        public void EntryPointLightGbmMulticlass()
         {
             Env.ComponentCatalog.RegisterAssembly(typeof(LightGbmBinaryModelParameters).Assembly);
             TestEntryPointRoutine(GetDataPath(@"iris.txt"), "Trainers.LightGbmClassifier");
@@ -1912,19 +2805,19 @@ namespace Microsoft.ML.RunTests
         }
 
         [Fact]
-        public void EntryPointSDCAMultiClass()
+        public void EntryPointSDCAMulticlass()
         {
             TestEntryPointRoutine("iris.txt", "Trainers.StochasticDualCoordinateAscentClassifier");
         }
 
-        [Fact()]
+        [Fact]
         public void EntryPointSDCARegression()
         {
             TestEntryPointRoutine(TestDatasets.generatedRegressionDatasetmacro.trainFilename, "Trainers.StochasticDualCoordinateAscentRegressor", loader: TestDatasets.generatedRegressionDatasetmacro.loaderSettings);
         }
 
         [Fact]
-        public void EntryPointLogisticRegressionMultiClass()
+        public void EntryPointLogisticRegressionMulticlass()
         {
             TestEntryPointRoutine("iris.txt", "Trainers.LogisticRegressionClassifier");
         }
@@ -1938,7 +2831,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointPcaTransform()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Label:0 col=Features:1-9",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Label:0 col=Features:1-9",
                 new[]
                 {
                     "Transforms.PcaCalculator",
@@ -2015,13 +2908,23 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointBinaryEnsemble()
         {
-            TestEntryPointRoutine("iris.txt", "Trainers.EnsembleBinaryClassifier");
+            TestEntryPointRoutine("iris.txt", "Trainers.EnsembleBinaryClassifier", xfNames:
+                new[] { "Transforms.ColumnTypeConverter" },
+                xfArgs:
+                new[] {
+                    @"'Column': [{'Name': 'Label','Source': 'Label','Type': 'BL'}]"
+                });
         }
 
         [Fact]
         public void EntryPointClassificationEnsemble()
         {
-            TestEntryPointRoutine("iris.txt", "Trainers.EnsembleClassification");
+            TestEntryPointRoutine("iris.txt", "Trainers.EnsembleClassification", xfNames:
+                new[] { "Transforms.TextToKeyConverter" },
+                xfArgs:
+                new[] {
+                    @"'Column': [{'Name': 'Label','Source': 'Label'}]"
+                });
         }
 
         [Fact]
@@ -2031,7 +2934,7 @@ namespace Microsoft.ML.RunTests
         }
 
         [Fact]
-        public void EntryPointNaiveBayesMultiClass()
+        public void EntryPointNaiveBayesMulticlass()
         {
             TestEntryPointRoutine("iris.txt", "Trainers.NaiveBayesClassifier");
         }
@@ -2051,7 +2954,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointBootstrap()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Label:R4:0 col=Features:R4:1-9",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Label:R4:0 col=Features:R4:1-9",
                 new[]
                 {
                     "Transforms.ApproximateBootstrapSampler"
@@ -2065,7 +2968,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointConvert()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=LT:TX:0 col=LB:BL:0 col=FT:TX:1-9 col=LN:0 col=FN:1-9 col=Key:U2[0-9]:2",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=LT:TX:0 col=LB:BL:0 col=FT:TX:1-9 col=LN:0 col=FN:1-9 col=Key:U2[0-9]:2",
                 new[]
                 {
                     "Transforms.ColumnTypeConverter",
@@ -2081,6 +2984,11 @@ namespace Microsoft.ML.RunTests
                       {
                         'Name': 'Label2',
                         'Source': 'LB'
+                      },
+                      {
+                        'Name': 'Label3',
+                        'Source': 'LB',
+                        'Type': 'TX'
                       },
                       {
                         'Name': 'Feat',
@@ -2106,7 +3014,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointGroupingOperations()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=G1:TX:0 col=G2:R4:0 col=G3:U4[0-100]:1 col=V1:R4:2 col=V2:TX:3 col=V3:U2[0-10]:4 col=V4:I4:5",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=G1:TX:0 col=G2:R4:0 col=G3:U4[0-100]:1 col=V1:R4:2 col=V2:TX:3 col=V3:U2[0-10]:4 col=V4:I4:5",
                 new[]
                 {
                     "Transforms.CombinerByContiguousGroupId",
@@ -2123,7 +3031,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointNAFilter()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Features:R4:1-9 header+",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Features:R4:1-9 header+",
                 new[]
                 {
                     "Transforms.MissingValuesRowDropper"
@@ -2133,7 +3041,7 @@ namespace Microsoft.ML.RunTests
                     @"'Column': [ 'Features' ]",
                 });
 
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Features:R4:1-9 header+",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Features:R4:1-9 header+",
                 new[]
                 {
                     "Transforms.MissingValuesRowDropper"
@@ -2148,7 +3056,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointGcnTransform()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=FV1:2-3 col=FV2:3-4 col=FV3:4-5 col=FV4:7-9 col=Label:0",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=FV1:2-3 col=FV2:3-4 col=FV3:4-5 col=FV4:7-9 col=Label:0",
                 new[]
                 {
                     "Transforms.LpNormalizer",
@@ -2196,7 +3104,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointGenerateNumber()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Label:0",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Label:0",
                 new[]
                 {
                     "Transforms.RandomNumberGenerator",
@@ -2226,7 +3134,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointRangeFilter()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Filter:R4:3",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Filter:R4:3",
                 new[]
                 {
                     "Transforms.RowRangeFilter",
@@ -2248,7 +3156,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointSkipTakeFilter()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Filter:R4:3",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Filter:R4:3",
                 new[]
                 {
                     "Transforms.RowSkipAndTakeFilter",
@@ -2352,10 +3260,29 @@ namespace Microsoft.ML.RunTests
             cmd.Run();
         }
 
-        internal void TestEntryPointRoutine(string dataFile, string trainerName, string loader = null, string trainerArgs = null)
+        internal void TestEntryPointRoutine(string dataFile, string trainerName, string loader = null, string trainerArgs = null, string[] xfNames = null, string[] xfArgs = null)
         {
             var dataPath = GetDataPath(dataFile);
             var outputPath = DeleteOutputPath("model.zip");
+            string xfTemplate =
+               @"'Name': '{0}',
+                    'Inputs': {{
+                      'Data': '$data{1}',
+                      {2},
+                    }},
+                    'Outputs': {{
+                      'OutputData': '$data{3}'
+                    }}";
+            var transforms = "";
+
+            for (int i = 0; i < Utils.Size(xfNames); i++)
+            {
+                transforms =
+                    $@"{transforms}
+                       {{
+                         {string.Format(xfTemplate, xfNames[i], i + 1, xfArgs[i], i + 2)}
+                       }},";
+            }
             string inputGraph = string.Format(@"
                 {{
                   'Nodes': [
@@ -2369,10 +3296,11 @@ namespace Microsoft.ML.RunTests
                         'Data': '$data1'
                       }}
                     }},
+                    {5}
                     {{
                       'Name': '{2}',
                       'Inputs': {{
-                        'TrainingData': '$data1'
+                        'TrainingData': '$data{6}'
                          {4}
                       }},
                       'Outputs': {{
@@ -2387,9 +3315,11 @@ namespace Microsoft.ML.RunTests
                     'model' : '{1}'
                   }}
                 }}", EscapePath(dataPath), EscapePath(outputPath), trainerName,
-                string.IsNullOrWhiteSpace(loader) ? "" : string.Format(",'CustomSchema': 'sparse+ {0}'", loader),
-                string.IsNullOrWhiteSpace(trainerArgs) ? "" : trainerArgs
-                );
+            string.IsNullOrWhiteSpace(loader) ? "" : string.Format(",'CustomSchema': 'sparse+ {0}'", loader),
+            string.IsNullOrWhiteSpace(trainerArgs) ? "" : trainerArgs,
+            transforms,
+            xfNames != null ? xfNames.Length + 1 : 1
+            );
 
             var jsonPath = DeleteOutputPath("graph.json");
             File.WriteAllLines(jsonPath, new[] { inputGraph });
@@ -2412,10 +3342,10 @@ namespace Microsoft.ML.RunTests
                 Columns = new[]
                 {
                     NormalizeTransform.AffineColumn.Parse("A"),
-                    new NormalizeTransform.AffineColumn() { Name = "B", Source = "B", FixZero = false },
+                    new NormalizeTransform.AffineColumn() { Name = "B", Source = "B", EnsureZeroUntouched = false },
                 },
-                FixZero = true, // Same as default, should not appear in the generated JSON.
-                MaxTrainingExamples = 1000
+                EnsureZeroUntouched = true, // Same as default, should not appear in the generated JSON.
+                MaximumExampleCount = 1000
             };
 
             var inputBindingMap = new Dictionary<string, List<ParameterBinding>>();
@@ -2577,7 +3507,7 @@ namespace Microsoft.ML.RunTests
             JObject graph = JObject.Parse(inputGraph);
             var runner = new GraphRunner(Env, graph[FieldNames.Nodes] as JArray);
 
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             runner.SetInput("file", inputFile);
 
@@ -2672,7 +3602,7 @@ namespace Microsoft.ML.RunTests
             JObject graph = JObject.Parse(inputGraph);
             var runner = new GraphRunner(Env, graph[FieldNames.Nodes] as JArray);
 
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             runner.SetInput("file", inputFile);
 
@@ -2777,7 +3707,7 @@ namespace Microsoft.ML.RunTests
             JObject graph = JObject.Parse(inputGraph);
             var runner = new GraphRunner(Env, graph[FieldNames.Nodes] as JArray);
 
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             runner.SetInput("file", inputFile);
 
@@ -2838,34 +3768,34 @@ namespace Microsoft.ML.RunTests
                         }
                     },
                     {
-			        'Name': 'Transforms.ColumnCopier',
+                    'Name': 'Transforms.ColumnCopier',
                     'Inputs': {
                         'Column': [
-					        {
-						        'Name': 'Features2',
-						        'Source': 'Features'
+                            {
+                                'Name': 'Features2',
+                                'Source': 'Features'
 
                             }
-				        ],
-				        'Data': '$data2'
-			        },
-			        'Outputs': {
-				        'OutputData': '$data3',
-				        'Model': '$transform2'
-			            }
-		            },
+                        ],
+                        'Data': '$data2'
+                    },
+                    'Outputs': {
+                        'OutputData': '$data3',
+                        'Model': '$transform2'
+                        }
+                    },
                     {
-			            'Name': 'Transforms.ModelCombiner',
+                        'Name': 'Transforms.ModelCombiner',
                         'Inputs': {
                             'Models': [
-					            '$transform1',
-					            '$transform2'
-				            ]
-			            },
-			            'Outputs': {
-				            'OutputModel': '$CombinedModel'
-			            }
-		            },
+                                '$transform1',
+                                '$transform2'
+                            ]
+                        },
+                        'Outputs': {
+                            'OutputModel': '$CombinedModel'
+                        }
+                    },
                     {
                       'Name': 'Models.TrainTestEvaluator',
                       'Inputs': {
@@ -2938,7 +3868,7 @@ namespace Microsoft.ML.RunTests
             JObject graph = JObject.Parse(inputGraph);
             var runner = new GraphRunner(Env, graph[FieldNames.Nodes] as JArray);
 
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             runner.SetInput("file", inputFile);
 
@@ -2952,8 +3882,8 @@ namespace Microsoft.ML.RunTests
 
             var metrics = runner.GetOutput<IDataView>("OverallMetrics");
 
-            Action<IDataView> validateAuc = (metricsIdv) => 
-            { 
+            Action<IDataView> validateAuc = (metricsIdv) =>
+            {
                 Assert.NotNull(metricsIdv);
                 using (var cursor = metricsIdv.GetRowCursorForAllColumns())
                 {
@@ -2999,34 +3929,34 @@ namespace Microsoft.ML.RunTests
                         }
                     },
                     {
-			        'Name': 'Transforms.ColumnCopier',
+                    'Name': 'Transforms.ColumnCopier',
                     'Inputs': {
                         'Column': [
-					        {
-						        'Name': 'Features2',
-						        'Source': 'Features'
+                            {
+                                'Name': 'Features2',
+                                'Source': 'Features'
 
                             }
-				        ],
-				        'Data': '$data2'
-			        },
-			        'Outputs': {
-				        'OutputData': '$data3',
-				        'Model': '$transform2'
-			            }
-		            },
+                        ],
+                        'Data': '$data2'
+                    },
+                    'Outputs': {
+                        'OutputData': '$data3',
+                        'Model': '$transform2'
+                        }
+                    },
                     {
-			            'Name': 'Transforms.ModelCombiner',
+                        'Name': 'Transforms.ModelCombiner',
                         'Inputs': {
                             'Models': [
-					            '$transform1',
-					            '$transform2'
-				            ]
-			            },
-			            'Outputs': {
-				            'OutputModel': '$CombinedModel'
-			            }
-		            },
+                                '$transform1',
+                                '$transform2'
+                            ]
+                        },
+                        'Outputs': {
+                            'OutputModel': '$CombinedModel'
+                        }
+                    },
                     {
                       'Name': 'Models.CrossValidator',
                       'Inputs': {
@@ -3069,22 +3999,22 @@ namespace Microsoft.ML.RunTests
                         'Kind': 'SignatureBinaryClassifierTrainer',
                         'Nodes': [
                             {
-			                    'Name': 'Transforms.ColumnCopier',
+                                'Name': 'Transforms.ColumnCopier',
                                 'Inputs': {
                                     'Column': [
-					                    {
-						                    'Name': 'Features3',
-						                    'Source': 'Features'
+                                        {
+                                            'Name': 'Features3',
+                                            'Source': 'Features'
 
                                         }
-				                    ],
-				                    'Data': '$data4'
-			                    },
-			                    'Outputs': {
-				                    'OutputData': '$data5',
-				                    'Model': '$transform3'
-			                        }
-		                       },
+                                    ],
+                                    'Data': '$data4'
+                                },
+                                'Outputs': {
+                                    'OutputData': '$data5',
+                                    'Model': '$transform3'
+                                    }
+                               },
                               {
                                 'Name': 'Trainers.StochasticDualCoordinateAscentBinaryClassifier',
                                 'Inputs': {
@@ -3096,17 +4026,17 @@ namespace Microsoft.ML.RunTests
                                 }
                               },
                             {
-			                    'Name': 'Transforms.ManyHeterogeneousModelCombiner',
+                                'Name': 'Transforms.ManyHeterogeneousModelCombiner',
                                 'Inputs': {
                                     'TransformModels': [
-					                    '$transform3'
-				                    ],
+                                        '$transform3'
+                                    ],
                                     'PredictorModel': '$predictor'
-			                    },
-			                    'Outputs': {
-				                    'PredictorModel': '$model2'
-			                    }
-		                    }
+                                },
+                                'Outputs': {
+                                    'PredictorModel': '$model2'
+                                }
+                            }
                         ],
                         'Inputs': {
                           'Data': '$data4'
@@ -3129,7 +4059,7 @@ namespace Microsoft.ML.RunTests
             JObject graph = JObject.Parse(inputGraph);
             var runner = new GraphRunner(Env, graph[FieldNames.Nodes] as JArray);
 
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             runner.SetInput("file", inputFile);
 
@@ -3143,8 +4073,8 @@ namespace Microsoft.ML.RunTests
 
             var metrics = runner.GetOutput<IDataView>("OverallMetrics");
 
-            Action<IDataView> aucValidate = (metricsIdv) => 
-            { 
+            Action<IDataView> aucValidate = (metricsIdv) =>
+            {
                 Assert.NotNull(metricsIdv);
                 using (var cursor = metrics.GetRowCursorForAllColumns())
                 {
@@ -3219,7 +4149,7 @@ namespace Microsoft.ML.RunTests
             var nodes = new JArray(graph.AllNodes.Select(node => node.ToJson()));
             var runner = new GraphRunner(Env, nodes);
 
-            var dataPath = GetDataPath("breast-cancer.txt");
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
             runner.SetInput("file", inputFile);
 
@@ -3317,7 +4247,7 @@ namespace Microsoft.ML.RunTests
                 InputFile = inputFile,
             }).Data;
 
-            var lrInput = new LogisticRegression.Options
+            var lrInput = new LbfgsLogisticRegressionBinaryTrainer.Options
             {
                 TrainingData = dataView,
                 NormalizeFeatures = NormalizeOption.Yes,
@@ -3325,16 +4255,16 @@ namespace Microsoft.ML.RunTests
                 ShowTrainingStatistics = true,
                 ComputeStandardDeviation = new ComputeLRTrainingStdThroughMkl()
             };
-            var model = LogisticRegression.TrainBinary(Env, lrInput).PredictorModel;
+            var model = LbfgsLogisticRegressionBinaryTrainer.TrainBinary(Env, lrInput).PredictorModel;
 
-            var mcLrInput = new MulticlassLogisticRegression.Options
+            var mcLrInput = new LbfgsMaximumEntropyMulticlassTrainer.Options
             {
                 TrainingData = dataView,
                 NormalizeFeatures = NormalizeOption.Yes,
                 NumberOfThreads = 1,
                 ShowTrainingStatistics = true
             };
-            var mcModel = LogisticRegression.TrainMultiClass(Env, mcLrInput).PredictorModel;
+            var mcModel = LbfgsMaximumEntropyMulticlassTrainer.TrainMulticlass(Env, mcLrInput).PredictorModel;
 
             var output = SummarizePredictor.Summarize(Env,
                 new SummarizePredictor.Input() { PredictorModel = model });
@@ -3391,11 +4321,11 @@ namespace Microsoft.ML.RunTests
                     InputFile = inputFile,
                 }).Data;
 
-                var pcaInput = new RandomizedPrincipalComponentAnalyzer.Options
+                var pcaInput = new RandomizedPcaTrainer.Options
                 {
                     TrainingData = dataView,
                 };
-                var model = RandomizedPrincipalComponentAnalyzer.TrainPcaAnomaly(Env, pcaInput).PredictorModel;
+                var model = RandomizedPcaTrainer.TrainPcaAnomaly(Env, pcaInput).PredictorModel;
 
                 var output = SummarizePredictor.Summarize(Env,
                     new SummarizePredictor.Input() { PredictorModel = model });
@@ -3526,7 +4456,7 @@ namespace Microsoft.ML.RunTests
                 Columns = new[] { new ColumnConcatenatingTransformer.Column { Name = "Features", Source = new[] { "Categories", "NumericFeatures" } } }
             });
 
-            var fastTree = Trainers.FastTree.FastTree.TrainBinary(Env, new FastTreeBinaryClassificationTrainer.Options
+            var fastTree = Trainers.FastTree.FastTree.TrainBinary(Env, new FastTreeBinaryTrainer.Options
             {
                 FeatureColumnName = "Features",
                 NumberOfTrees = 5,
@@ -3603,11 +4533,11 @@ namespace Microsoft.ML.RunTests
                 },
                 InputFile = inputFile,
             }).Data;
-            var embedding = Transforms.Text.TextAnalytics.WordEmbeddings(Env, new WordEmbeddingsExtractingTransformer.Options()
+            var embedding = Transforms.Text.TextAnalytics.WordEmbeddings(Env, new WordEmbeddingTransformer.Options()
             {
                 Data = dataView,
-                Columns = new[] { new WordEmbeddingsExtractingTransformer.Column { Name = "Features", Source = "Text" } },
-                ModelKind = WordEmbeddingsExtractingEstimator.PretrainedModelKind.Sswe
+                Columns = new[] { new WordEmbeddingTransformer.Column { Name = "Features", Source = "Text" } },
+                ModelKind = WordEmbeddingEstimator.PretrainedModelKind.SentimentSpecificWordEmbedding
             });
             var result = embedding.OutputData;
             using (var cursor = result.GetRowCursorForAllColumns())
@@ -3623,21 +4553,6 @@ namespace Microsoft.ML.RunTests
                     Assert.NotEqual(0, feat.GetValues()[0]);
                 }
             }
-        }
-
-        [TensorFlowFact]
-        public void EntryPointTensorFlowTransform()
-        {
-            Env.ComponentCatalog.RegisterAssembly(typeof(TensorFlowTransformer).Assembly);
-
-            TestEntryPointPipelineRoutine(GetDataPath("Train-Tiny-28x28.txt"), "col=Label:R4:0 col=Placeholder:R4:1-784",
-                new[] { "Transforms.TensorFlowScorer" },
-                new[]
-                {
-                    @"'InputColumns': [ 'Placeholder' ],
-                      'ModelLocation': 'mnist_model/frozen_saved_model.pb',
-                      'OutputColumns': [ 'Softmax' ]"
-                });
         }
 
         [Fact(Skip = "Needs real time series dataset. https://github.com/dotnet/machinelearning/issues/1120")]
@@ -3734,7 +4649,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointPercentileThreshold()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Input:R4:1",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Input:R4:1",
                 new[]
                 {
                     "TimeSeriesProcessingEntryPoints.PercentileThresholdTransform"
@@ -3751,7 +4666,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointPValue()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Input:R4:1",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Input:R4:1",
                 new[]
                 {
                     "TimeSeriesProcessingEntryPoints.PValueTransform"
@@ -3767,7 +4682,7 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointSlidingWindow()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Input:R4:1",
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Input:R4:1",
                 new[]
                 {
                     "TimeSeriesProcessingEntryPoints.SlidingWindowTransform",
@@ -3799,25 +4714,77 @@ namespace Microsoft.ML.RunTests
         [Fact]
         public void EntryPointHashJoinCountTable()
         {
-            TestEntryPointPipelineRoutine(GetDataPath("breast-cancer.txt"), "col=Text:Text:1-9 col=Label:0",
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
+            var countsModel = DeleteOutputPath("CountTable-trained-counts.zip");
+
+            var data = ML.Data.LoadFromTextFile(dataPath, new[]
+                {
+                    new TextLoader.Column("Text", DataKind.String, 1, 2),
+                    new TextLoader.Column("Label", DataKind.Single, 0)
+                });
+            var estimator = ML.Transforms.CountTargetEncode("Text", builder: CountTableBuilderBase.CreateDictionaryCountTableBuilder(), combine: false);
+            var transformer = estimator.Fit(data);
+            ML.Model.Save(transformer, data.Schema, countsModel);
+
+            TestEntryPointPipelineRoutine(GetDataPath(TestDatasets.breastCancer.trainFilename), "col=Text:TX:1-9 col=OneText:TX:1 col=Label:0",
                 new[]
                 {
                     "Transforms.HashConverter",
+                    "Transforms.CountTableBuilder"
                 },
                 new[]
                 {
                     @"'Column': [
                       {
                         'Name': 'Temp',
-                        'Src': 'Text'
-                      },
-                      {
-                        'Name': 'Temp2',
                         'Src': 'Text',
                         'CustomSlotMap': '0,1;2,3,4,5'
                       }
+                      ]",
+                    $@"'Columns': [
+                      {{
+                        'Name': 'DT',
+                        'Src': 'Temp'
+                      }}
+                      ],
+                     'Lab': 'Label',
+                     'Table': {{ 'Name': 'Dict' }},
+                     'InitialCountsModel': '{EscapePath(countsModel)}'"
+                });
+        }
 
-                      ]"
+        [Fact]
+        public void EntryPointCountTargetEncoding()
+        {
+            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
+            var countsModel = DeleteOutputPath("cte-trained-counts.zip");
+
+            var data = ML.Data.LoadFromTextFile(dataPath, new[]
+                {
+                    new TextLoader.Column("Text", DataKind.String, 1, 2),
+                    new TextLoader.Column("Label", DataKind.Single, 0)
+                });
+            var estimator = ML.Transforms.CountTargetEncode("Text", builder: CountTableBuilderBase.CreateDictionaryCountTableBuilder(), combine: false);
+            var transformer = estimator.Fit(data);
+            ML.Model.Save(transformer, data.Schema, countsModel);
+
+            TestEntryPointPipelineRoutine(dataPath, "col=Text:TX:1-2 col=Label:0",
+                new[]
+                {
+                    "Transforms.CountTargetEncoder",
+                },
+                new[]
+                {
+                    $@"'Columns': [
+                      {{
+                        'Name': 'DT',
+                        'Src': 'Text',
+                        'Combine': 'False'
+                      }}
+                      ],
+                     'Lab': 'Label',
+                     'Table': {{ 'Name': 'Dict' }},
+                     'InitialCountsModel': '{EscapePath(countsModel)}'"
                 });
         }
 
@@ -3925,10 +4892,10 @@ namespace Microsoft.ML.RunTests
                                     'Source': 'Categories'
                                 }
                             ],
-                            'OutputKind': 'Ind',
+                            'OutputKind': 'Indicator',
                             'MaxNumTerms': 1000000,
                             'Term': null,
-                            'Sort': 'Occurrence',
+                            'Sort': 'ByOccurrence',
                             'TextKeyValues': true,
                             'Data': '$Var_99eb21288359485f936577da8f2e1061'
                         },
@@ -4045,7 +5012,7 @@ namespace Microsoft.ML.RunTests
             }
         }
 
-        [LessThanNetCore30OrNotNetCoreFact("netcoreapp3.0 output differs from Baseline")]
+        [Fact]
         public void TestCrossValidationMacro()
         {
             var dataPath = GetDataPath(TestDatasets.generatedRegressionDatasetmacro.trainFilename);
@@ -4276,7 +5243,7 @@ namespace Microsoft.ML.RunTests
         }
 
         [Fact]
-        public void TestCrossValidationMacroWithMultiClass()
+        public void TestCrossValidationMacroWithMulticlass()
         {
             var dataPath = GetDataPath(@"Train-Tiny-28x28.txt");
             string inputGraph = @"
@@ -4363,7 +5330,7 @@ namespace Microsoft.ML.RunTests
                             },
                             'StratificationColumn': null,
                             'NumFolds': 2,
-                            'Kind': 'SignatureMultiClassClassifierTrainer',
+                            'Kind': 'SignatureMulticlassClassificationTrainer',
                             'LabelColumn': 'Label',
                             'WeightColumn': null,
                             'GroupColumn': null,
@@ -4438,7 +5405,7 @@ namespace Microsoft.ML.RunTests
             foldCol = schema.GetColumnOrNull("Fold Index");
             Assert.True(foldCol.HasValue);
             var type = schema["Count"].Annotations.Schema[AnnotationUtils.Kinds.SlotNames].Type;
-            Assert.True(type is VectorType vecType && vecType.ItemType is TextDataViewType && vecType.Size == 10);
+            Assert.True(type is VectorDataViewType vecType && vecType.ItemType is TextDataViewType && vecType.Size == 10);
             var slotNames = default(VBuffer<ReadOnlyMemory<char>>);
             schema["Count"].GetSlotNames(ref slotNames);
             var slotNameValues = slotNames.GetValues();
@@ -4475,7 +5442,7 @@ namespace Microsoft.ML.RunTests
         }
 
         [Fact]
-        public void TestCrossValidationMacroMultiClassWithWarnings()
+        public void TestCrossValidationMacroMulticlassWithWarnings()
         {
             var dataPath = GetDataPath(@"Train-Tiny-28x28.txt");
             string inputGraph = @"
@@ -4524,7 +5491,7 @@ namespace Microsoft.ML.RunTests
                             'Column': [{
                                     'MaxNumTerms': null,
                                     'Term': null,
-                                    'Sort': 'Value',
+                                    'Sort': 'ByValue',
                                     'TextKeyValues': null,
                                     'Name': 'Strat',
                                     'Source': 'Label'
@@ -4532,7 +5499,7 @@ namespace Microsoft.ML.RunTests
                             ],
                             'MaxNumTerms': 1000000,
                             'Term': null,
-                            'Sort': 'Occurrence',
+                            'Sort': 'ByOccurrence',
                             'TextKeyValues': false,
                             'Data': '$Var_64f1865a99b84b9d9e0c72292c14c3af'
                         },
@@ -4590,7 +5557,7 @@ namespace Microsoft.ML.RunTests
                             },
                             'StratificationColumn': 'Strat',
                             'NumFolds': 2,
-                            'Kind': 'SignatureMultiClassClassifierTrainer',
+                            'Kind': 'SignatureMulticlassClassificationTrainer',
                             'LabelColumn': 'Label',
                             'WeightColumn': null,
                             'GroupColumn': null,
@@ -4822,7 +5789,7 @@ namespace Microsoft.ML.RunTests
                 getter(ref stdev);
                 foldGetter(ref fold);
                 Assert.True(ReadOnlyMemoryUtils.EqualsStr("Standard Deviation", fold));
-                Assert.Equal(0.00481, stdev, 5);
+                Assert.Equal(0.02582, stdev, 5);
 
                 double sum = 0;
                 double val = 0;
@@ -4928,7 +5895,7 @@ namespace Microsoft.ML.RunTests
                                     ],
                                     'MaxNumTerms': 1000000,
                                     'Term': null,
-                                    'Sort': 'Occurrence',
+                                    'Sort': 'ByOccurrence',
                                     'TextKeyValues': false,
                                     'Data': '$Var_48d35aae527f439398805f51e5f0cfab'
                                 },
@@ -4942,7 +5909,7 @@ namespace Microsoft.ML.RunTests
                                     'Column': [{
                                             'Join': null,
                                             'CustomSlotMap': null,
-                                            'HashBits': null,
+                                            'NumberOfBits': null,
                                             'Seed': null,
                                             'Ordered': null,
                                             'Name': 'GroupId1',
@@ -4950,7 +5917,7 @@ namespace Microsoft.ML.RunTests
                                         }
                                     ],
                                     'Join': true,
-                                    'HashBits': 31,
+                                    'NumberOfBits': 31,
                                     'Seed': 314489979,
                                     'Ordered': true,
                                     'Data': '$Var_44ac8ba819da483089dacc0f12bae3d6'
@@ -5123,9 +6090,9 @@ namespace Microsoft.ML.RunTests
                 foldGetter(ref fold);
                 Assert.True(ReadOnlyMemoryUtils.EqualsStr("Standard Deviation", fold));
                 var stdevValues = stdev.GetValues();
-                Assert.Equal(2.462, stdevValues[0], 3);
-                Assert.Equal(2.763, stdevValues[1], 3);
-                Assert.Equal(3.273, stdevValues[2], 3);
+                Assert.Equal(0.02462, stdevValues[0], 5);
+                Assert.Equal(0.02763, stdevValues[1], 5);
+                Assert.Equal(0.03273, stdevValues[2], 5);
 
                 var sumBldr = new BufferBuilder<double>(R8Adder.Instance);
                 sumBldr.Reset(avg.Length, true);
@@ -5315,7 +6282,7 @@ namespace Microsoft.ML.RunTests
 
             var data = runner.GetOutput<IDataView>("overallMetrics");
             var schema = data.Schema;
-            var accCol = schema.GetColumnOrNull(MultiClassClassifierEvaluator.AccuracyMacro);
+            var accCol = schema.GetColumnOrNull(MulticlassClassificationEvaluator.AccuracyMacro);
             Assert.True(accCol.HasValue);
             bool b;
             using (var cursor = data.GetRowCursor(accCol.Value))
@@ -5332,6 +6299,7 @@ namespace Microsoft.ML.RunTests
         }
 
         [Fact]
+        //Skipping test temporarily. This test will be re-enabled once the cause of failures has been determined
         public void TestOvaMacroWithUncalibratedLearner()
         {
             var dataPath = GetDataPath(@"iris.txt");
@@ -5486,7 +6454,7 @@ namespace Microsoft.ML.RunTests
 
             var data = runner.GetOutput<IDataView>("overallMetrics");
             var schema = data.Schema;
-            var accCol = schema.GetColumnOrNull(MultiClassClassifierEvaluator.AccuracyMacro);
+            var accCol = schema.GetColumnOrNull(MulticlassClassificationEvaluator.AccuracyMacro);
             Assert.True(accCol.HasValue);
             bool b;
             using (var cursor = data.GetRowCursor(accCol.Value))
@@ -5500,6 +6468,21 @@ namespace Microsoft.ML.RunTests
                 b = cursor.MoveNext();
                 Assert.False(b);
             }
+        }
+
+        [TensorFlowFact]
+        public void EntryPointTensorFlowTransform()
+        {
+            Env.ComponentCatalog.RegisterAssembly(typeof(TensorFlowTransformer).Assembly);
+
+            TestEntryPointPipelineRoutine(GetDataPath("Train-Tiny-28x28.txt"), "col=Label:R4:0 col=Placeholder:R4:1-784",
+                new[] { "Transforms.TensorFlowScorer" },
+                new[]
+                {
+                    @"'InputColumns': [ 'Placeholder' ],
+                      'ModelLocation': 'mnist_model/frozen_saved_model.pb',
+                      'OutputColumns': [ 'Softmax' ]"
+                });
         }
 
         [TensorFlowFact]
@@ -5569,18 +6552,7 @@ namespace Microsoft.ML.RunTests
                             'OutputColumns': [
                                 'Softmax'
                             ],
-                            'LabelColumn': null,
-                            'TensorFlowLabel': null,
-                            'OptimizationOperation': null,
-                            'LossOperation': null,
-                            'MetricOperation': null,
                             'BatchSize': 64,
-                            'Epoch': 5,
-                            'LearningRateOperation': null,
-                            'LearningRate': 0.01,
-                            'SaveLocationOperation': 'save/Const',
-                            'SaveOperation': 'save/control_dependency',
-                            'ReTrain': false,
                             'Data': '$Var_2802f3e485814063828c2303ec60327c'
                         },
                         'Outputs': {
@@ -5602,22 +6574,324 @@ namespace Microsoft.ML.RunTests
             var schema = data.Schema;
             Assert.Equal(3, schema.Count);
             Assert.Equal("Softmax", schema[2].Name);
-            Assert.Equal(10, (schema[2].Type as VectorType)?.Size);
+            Assert.Equal(10, (schema[2].Type as VectorDataViewType)?.Size);
         }
 
         [Fact]
         public void LoadEntryPointModel()
         {
-            var ml = new MLContext();
+            var ml = new MLContext(1);
             for (int i = 0; i < 5; i++)
             {
                 var modelPath = GetDataPath($"backcompat/ep_model{i}.zip");
                 ITransformer loadedModel;
                 using (var stream = File.OpenRead(modelPath))
                 {
-                    loadedModel = ml.Model.Load(stream);
+                    loadedModel = ml.Model.Load(stream, out var inputSchema);
                 }
+            }
+        }
 
+        [Fact]
+        public void SummarizeEntryPointTest()
+        {
+            var dataPath = GetDataPath(@"breast-cancer.txt");
+            var outputPath = GetOutputPath("EntryPoints", "Summarize.txt");
+
+            string inputGraph = @"
+             {
+                'Nodes':
+                [
+                    {
+                        'Name': 'Data.TextLoader',
+                        'Inputs':
+                        {
+                            'InputFile': '$inputFile',
+                            'Arguments':
+                            {
+                                'UseThreads': true,
+                                'HeaderFile': null,
+                                'MaxRows': null,
+                                'AllowQuoting': true,
+                                'AllowSparse': true,
+                                'InputSize': null,
+                                'Separator':
+                                [
+                                    '\t'
+                                ],
+                                'Column':
+                                [
+                                    {'Name':'Label','Type':null,'Source':[{'Min':0,'Max':0,'AutoEnd':false,'VariableEnd':false,'AllOther':false,'ForceVector':false}],'KeyCount':null},
+                                    {'Name':'Strat','Type':null,'Source':[{'Min':1,'Max':1,'AutoEnd':false,'VariableEnd':false,'AllOther':false,'ForceVector':false}],'KeyCount':null},
+                                    {'Name':'Features','Type':null,'Source':[{'Min':2,'Max':9,'AutoEnd':false,'VariableEnd':false,'AllOther':false,'ForceVector':false}],'KeyCount':null}
+                                ],
+                                'TrimWhitespace': false,
+                                'HasHeader': false
+                            }
+                        },
+                        'Outputs':
+                        {
+                            'Data': '$data'
+                        }
+                    },
+                    {
+                        'Name': 'Trainers.FastTreeBinaryClassifier',
+                        'Inputs': {'TrainingData':'$data','NumberOfThreads':1},
+                        'Outputs': {'PredictorModel':'$model'}
+                    },
+                    {
+                        'Inputs':
+                        {
+                            'PredictorModel': '$model'
+                        },
+                        'Name': 'Models.Summarizer',
+                        'Outputs':
+                        {
+                            'Summary': '$output_data'
+                        }
+                    }
+                ]
+            }
+            ";
+
+            JObject graph = JObject.Parse(inputGraph);
+            var runner = new GraphRunner(Env, graph[FieldNames.Nodes] as JArray);
+            var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
+            runner.SetInput("inputFile", inputFile);
+            runner.RunAll();
+            var data = runner.GetOutput<IDataView>("output_data");
+
+            using (var f = File.Open(outputPath, FileMode.Create, FileAccess.Write, FileShare.None))
+                ML.Data.SaveAsText(data, f);
+
+            CheckEquality("EntryPoints", "Summarize.txt");
+
+            Done();
+        }
+
+        [LightGBMFact]
+        void RankingWithColumnIdEntryPoint()
+        {
+            Env.ComponentCatalog.RegisterAssembly(typeof(LightGbmBinaryModelParameters).Assembly);
+            var dataPath = GetDataPath(@"adult.tiny.with-schema.txt");
+
+            string inputGraph = $@"
+                {{
+                    'Nodes': [
+                        {{
+                            'Inputs': {{
+                                'CustomSchema': 'col=Label:R4:0 col=GroupId:TX:1 col=Features_1:R4:9-14 header+ sep=tab',
+                                'InputFile': '$file'
+                            }},
+                            'Name': 'Data.CustomTextLoader',
+                            'Outputs': {{
+                                'Data': '$input_data'
+                            }}
+                        }},
+                        {{
+                            'Inputs': {{
+                                'Column': [
+                                    {{
+                                        'Name': 'GroupId',
+                                        'Source': 'GroupId'
+                                    }}
+                                ],
+                                'Data': '$input_data',
+                                'MaxNumTerms': 1000000,
+                                'Sort': 'ByOccurrence',
+                                'TextKeyValues': false
+                            }},
+                            'Name': 'Transforms.TextToKeyConverter',
+                            'Outputs': {{
+                                'Model': '$output_model1',
+                                'OutputData': '$output_data1'
+                            }}
+                        }},
+                        {{
+                            'Inputs': {{
+                                'Column': [
+                                    {{
+                                        'Name': 'Features',
+                                        'Source': [
+                                            'Features_1'
+                                        ]
+                                    }}
+                                ],
+                                'Data': '$output_data1'
+                            }},
+                            'Name': 'Transforms.ColumnConcatenator',
+                            'Outputs': {{
+                                'Model': '$output_model2',
+                                'OutputData': '$output_data2'
+                            }}
+                        }},
+                        {{
+                            'Inputs': {{
+                                'Models': [
+                                    '$output_model1',
+                                    '$output_model2'
+                                ]
+                            }},
+                            'Name': 'Transforms.ModelCombiner',
+                            'Outputs': {{
+                                'OutputModel': '$output_model_combined_pre_split'
+                            }}
+                        }},
+                        {{
+                            'Inputs': {{
+                                'Data': '$output_data2',
+                                'GroupColumn': 'GroupId',
+                                'Inputs': {{
+                                    'Data': '$cv_subgraph_input_data'
+                                }},
+                                'Kind': 'SignatureRankerTrainer',
+                                'LabelColumn': 'Label',
+                                'NameColumn': 'Name',
+                                'Nodes': [
+                                    {{
+                                        'Inputs': {{
+                                            'Column': [
+                                                'Label'
+                                            ],
+                                            'Data': '$cv_subgraph_input_data'
+                                        }},
+                                        'Name': 'Transforms.OptionalColumnCreator',
+                                        'Outputs': {{
+                                            'Model': '$output_model3',
+                                            'OutputData': '$optional_data'
+                                        }}
+                                    }},
+                                    {{
+                                        'Inputs': {{
+                                            'Data': '$optional_data',
+                                            'LabelColumn': 'Label',
+                                            'TextKeyValues': false
+                                        }},
+                                        'Name': 'Transforms.LabelColumnKeyBooleanConverter',
+                                        'Outputs': {{
+                                            'Model': '$output_model4',
+                                            'OutputData': '$label_data'
+                                        }}
+                                    }},
+                                    {{
+                                        'Inputs': {{
+                                            'Data': '$label_data',
+                                            'Features': [
+                                                'Features'
+                                            ]
+                                        }},
+                                        'Name': 'Transforms.FeatureCombiner',
+                                        'Outputs': {{
+                                            'Model': '$output_model5',
+                                            'OutputData': '$output_data'
+                                        }}
+                                    }},
+                                    {{
+                                        'Inputs': {{
+                                            'BatchSize': 1048576,
+                                            'Caching': 'Auto',
+                                            'CategoricalSmoothing': 10.0,
+                                            'CustomGains': [
+                                                0,
+                                                3,
+                                                7,
+                                                15,
+                                                31,
+                                                63,
+                                                127,
+                                                255,
+                                                511,
+                                                1023,
+                                                2047,
+                                                4095
+                                            ],
+                                            'EarlyStoppingRound': 0,
+                                            'EvaluationMetric': 'NormalizedDiscountedCumulativeGain',
+                                            'FeatureColumnName': 'Features',
+                                            'HandleMissingValue': true,
+                                            'L2CategoricalRegularization': 10.0,
+                                            'LabelColumnName': 'Label',
+                                            'MaximumBinCountPerFeature': 255,
+                                            'MaximumCategoricalSplitPointCount': 32,
+                                            'MinimumExampleCountPerGroup': 100,
+                                            'MinimumExampleCountPerLeaf': 1,
+                                            'NormalizeFeatures': 'Auto',
+                                            'NumberOfIterations': 100,
+                                            'RowGroupColumnName': 'GroupId',
+                                            'Sigmoid': 0.5,
+                                            'Silent': true,
+                                            'TrainingData': '$output_data',
+                                            'UseZeroAsMissingValue': false,
+                                            'Verbose': false
+                                        }},
+                                        'Name': 'Trainers.LightGbmRanker',
+                                        'Outputs': {{
+                                            'PredictorModel': '$output_model_learner'
+                                        }}
+                                    }},
+                                    {{
+                                        'Inputs': {{
+                                            'PredictorModel': '$output_model_learner',
+                                            'TransformModels': [
+                                                '$output_model3',
+                                                '$output_model4',
+                                                '$output_model5'
+                                            ]
+                                        }},
+                                        'Name': 'Transforms.ManyHeterogeneousModelCombiner',
+                                        'Outputs': {{
+                                            'PredictorModel': '$predictor_model'
+                                        }}
+                                    }}
+                                ],
+                                'NumFolds': 2,
+                                'Outputs': {{
+                                    'PredictorModel': '$predictor_model'
+                                }},
+                                'StratificationColumn': 'GroupId',
+                                'TransformModel': '$output_model_combined_pre_split'
+                            }},
+                            'Name': 'Models.CrossValidator',
+                            'Outputs': {{
+                                'OverallMetrics': '$overall_metrics',
+                                'PerInstanceMetrics': '$per_instance_metrics',
+                                'PredictorModel': '$predictor_model',
+                                'Warnings': '$warnings'
+                            }}
+                        }}
+                    ],
+                    'Outputs': {{
+                        'overall_metrics': '$outmetrics',
+                        'per_instance_metrics': '',
+                        'predictor_model': '$outModel',
+                        'warnings': '$outwarnings'
+                    }}
+                }}
+
+            ";
+
+            JObject graph = JObject.Parse(inputGraph);
+            var runner = new GraphRunner(Env, graph[FieldNames.Nodes] as JArray);
+            var inputFile = new SimpleFileHandle(Env, dataPath, false, false);
+            runner.SetInput("file", inputFile);
+            runner.RunAll();
+
+            var data = runner.GetOutput<IDataView>("overall_metrics");
+            using(var cursor = data.GetRowCursorForAllColumns())
+            {
+                var ndcgGetter = cursor.GetGetter<VBuffer<Double>>(data.Schema["NDCG"]);
+                VBuffer<Double> ndcgBuffer = default;
+
+                cursor.MoveNext();
+                ndcgGetter(ref ndcgBuffer);
+                var ndcgArray = ndcgBuffer.DenseValues().ToArray();
+
+                // Since we used a toy dataset, we won't worry much about comparing actual
+                // Double values of the result. Simply check that we get results.
+                Assert.Equal(3, ndcgArray.Length);
+                Assert.True(ndcgArray[0] > 0);
+                Assert.True(ndcgArray[1] > 0);
+                Assert.True(ndcgArray[2] > 0);
             }
         }
     }

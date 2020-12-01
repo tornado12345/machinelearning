@@ -6,15 +6,14 @@ using BenchmarkDotNet.Attributes;
 using Microsoft.ML.Benchmarks.Harness;
 using Microsoft.ML.Calibrators;
 using Microsoft.ML.Data;
-using Microsoft.ML.TestFramework;
 using Microsoft.ML.Trainers;
 
 namespace Microsoft.ML.Benchmarks
 {
     [CIBenchmark]
-    public class KMeansAndLogisticRegressionBench
+    public class KMeansAndLogisticRegressionBench : BenchmarkBase
     {
-        private readonly string _dataPath = BaseTestClass.GetDataPath("adult.tiny.with-schema.txt");
+        private readonly string _dataPath = GetBenchmarkDataPathAndEnsureData("adult.tiny.with-schema.txt");
 
         [Benchmark]
         public CalibratedModelParametersBase<LinearBinaryModelParameters, PlattCalibrator> TrainKMeansAndLR()
@@ -35,12 +34,12 @@ namespace Microsoft.ML.Benchmarks
             }, hasHeader: true);
 
             var estimatorPipeline = ml.Transforms.Categorical.OneHotEncoding("CatFeatures")
-                .Append(ml.Transforms.Normalize("NumFeatures"))
+                .Append(ml.Transforms.NormalizeMinMax("NumFeatures"))
                 .Append(ml.Transforms.Concatenate("Features", "NumFeatures", "CatFeatures"))
                 .Append(ml.Clustering.Trainers.KMeans("Features"))
                 .Append(ml.Transforms.Concatenate("Features", "Features", "Score"))
-                .Append(ml.BinaryClassification.Trainers.LogisticRegression(
-                    new LogisticRegression.Options { EnforceNonNegativity = true, OptmizationTolerance = 1e-3f, }));
+                .Append(ml.BinaryClassification.Trainers.LbfgsLogisticRegression(
+                    new LbfgsLogisticRegressionBinaryTrainer.Options { EnforceNonNegativity = true, OptimizationTolerance = 1e-3f, }));
 
             var model = estimatorPipeline.Fit(input);
             // Return the last model in the chain.

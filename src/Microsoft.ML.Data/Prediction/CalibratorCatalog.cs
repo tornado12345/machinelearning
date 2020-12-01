@@ -3,11 +3,12 @@
 // See the LICENSE file in the project root for more information.
 
 using System;
+using System.Collections.Generic;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Calibrators;
 using Microsoft.ML.Data;
+using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Trainers;
 
@@ -77,6 +78,8 @@ namespace Microsoft.ML.Calibrators
         /// <summary>
         /// Gets the output <see cref="SchemaShape"/> of the <see cref="IDataView"/> after fitting the calibrator.
         /// Fitting the calibrator will add a column named "Probability" to the schema. If you already had such a column, a new one will be added.
+        /// The same annotation data that would be produced by <see cref="AnnotationUtils.GetTrainerOutputAnnotation(bool)"/> is marked as
+        /// being present on the output, if it is present on the input score column.
         /// </summary>
         /// <param name="inputSchema">The input <see cref="SchemaShape"/>.</param>
         SchemaShape IEstimator<CalibratorTransformer<TICalibrator>>.GetOutputSchema(SchemaShape inputSchema)
@@ -97,13 +100,32 @@ namespace Microsoft.ML.Calibrators
             checkColumnValid(WeightColumn, "weight");
             checkColumnValid(LabelColumn, "label");
 
+            bool success = inputSchema.TryFindColumn(ScoreColumn.Name, out var inputScoreCol);
+            Host.Assert(success);
+            const SchemaShape.Column.VectorKind scalar = SchemaShape.Column.VectorKind.Scalar;
+
+            var annotations = new List<SchemaShape.Column>();
+            annotations.Add(new SchemaShape.Column(AnnotationUtils.Kinds.IsNormalized,
+                SchemaShape.Column.VectorKind.Scalar, BooleanDataViewType.Instance, false));
+            // We only propagate this training column metadata if it looks like it's all there, and all correct.
+            if (inputScoreCol.Annotations.TryFindColumn(AnnotationUtils.Kinds.ScoreColumnSetId, out var setIdCol) &&
+                setIdCol.Kind == scalar && setIdCol.IsKey && setIdCol.ItemType == NumberDataViewType.UInt32 &&
+                inputScoreCol.Annotations.TryFindColumn(AnnotationUtils.Kinds.ScoreColumnKind, out var kindCol) &&
+                kindCol.Kind == scalar && kindCol.ItemType is TextDataViewType &&
+                inputScoreCol.Annotations.TryFindColumn(AnnotationUtils.Kinds.ScoreValueKind, out var valueKindCol) &&
+                valueKindCol.Kind == scalar && valueKindCol.ItemType is TextDataViewType)
+            {
+                annotations.Add(setIdCol);
+                annotations.Add(kindCol);
+                annotations.Add(valueKindCol);
+            }
+
             // Create the new Probability column.
             var outColumns = inputSchema.ToDictionary(x => x.Name);
             outColumns[DefaultColumnNames.Probability] = new SchemaShape.Column(DefaultColumnNames.Probability,
                 SchemaShape.Column.VectorKind.Scalar,
                 NumberDataViewType.Single,
-                false,
-                new SchemaShape(AnnotationUtils.GetTrainerOutputAnnotation(true)));
+                false, new SchemaShape(annotations));
 
             return new SchemaShape(outColumns.Values);
         }
@@ -121,7 +143,7 @@ namespace Microsoft.ML.Calibrators
             {
                 var calibrator = (TICalibrator)CalibratorUtils.TrainCalibrator(Host, ch,
                     _calibratorTrainer, input, LabelColumn.Name, ScoreColumn.Name, WeightColumn.Name);
-                return Create(Host, calibrator);
+                return Create(Host, calibrator, ScoreColumn.Name);
             }
         }
 
@@ -129,7 +151,7 @@ namespace Microsoft.ML.Calibrators
         /// Implemented by deriving classes that create a concrete calibrator.
         /// </summary>
         [BestFriend]
-        private protected abstract CalibratorTransformer<TICalibrator> Create(IHostEnvironment env, TICalibrator calibrator);
+        private protected abstract CalibratorTransformer<TICalibrator> Create(IHostEnvironment env, TICalibrator calibrator, string scoreColumnName);
     }
 
     /// <summary>
@@ -145,12 +167,14 @@ namespace Microsoft.ML.Calibrators
     {
         private readonly TICalibrator _calibrator;
         private readonly string _loaderSignature;
+        private readonly string _scoreColumnName;
 
-        private protected CalibratorTransformer(IHostEnvironment env, TICalibrator calibrator, string loaderSignature)
+        private protected CalibratorTransformer(IHostEnvironment env, TICalibrator calibrator, string loaderSignature, string scoreColumnName)
             : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(CalibratorTransformer<TICalibrator>)))
         {
             _loaderSignature = loaderSignature;
             _calibrator = calibrator;
+            _scoreColumnName = scoreColumnName;
         }
 
         // Factory method for SignatureLoadModel.
@@ -164,10 +188,19 @@ namespace Microsoft.ML.Calibrators
 
             // *** Binary format ***
             // model: _calibrator
+            // scoreColumnName: _scoreColumnName
             ctx.LoadModel<TICalibrator, SignatureLoadModel>(env, out _calibrator, "Calibrator");
+            if (ctx.Header.ModelVerWritten >= 0x00010002)
+            {
+                _scoreColumnName = ctx.LoadString();
+            }
+            else
+            {
+                _scoreColumnName = DefaultColumnNames.Score;
+            }
         }
 
-        string ISingleFeaturePredictionTransformer<TICalibrator>.FeatureColumn => DefaultColumnNames.Score;
+        string ISingleFeaturePredictionTransformer<TICalibrator>.FeatureColumnName => DefaultColumnNames.Score;
 
         DataViewType ISingleFeaturePredictionTransformer<TICalibrator>.FeatureColumnType => NumberDataViewType.Single;
 
@@ -183,38 +216,45 @@ namespace Microsoft.ML.Calibrators
 
             // *** Binary format ***
             // model: _calibrator
-            ctx.SaveModel(_calibrator, @"Calibrator");
+            // scoreColumnName: _scoreColumnName
+            ctx.SaveModel(_calibrator, "Calibrator");
+            ctx.SaveString(_scoreColumnName);
         }
 
-        private protected override IRowMapper MakeRowMapper(DataViewSchema schema) => new Mapper<TICalibrator>(this, _calibrator, schema);
+        private protected override IRowMapper MakeRowMapper(DataViewSchema schema) => new Mapper<TICalibrator>(this, _calibrator, schema, _scoreColumnName);
 
         private protected VersionInfo GetVersionInfo()
         {
             return new VersionInfo(
                 modelSignature: "CALTRANS",
-                verWrittenCur: 0x00010001, // Initial
+                // verWrittenCur: 0x00010001, // Initial
+                verWrittenCur: 0x00010002, // Added _scoreColumnName
                 verReadableCur: 0x00010001,
                 verWeCanReadBack: 0x00010001,
                 loaderSignature: _loaderSignature,
                 loaderAssemblyName: typeof(CalibratorTransformer<>).Assembly.FullName);
         }
 
-        private sealed class Mapper<TCalibrator> : MapperBase
+        private sealed class Mapper<TCalibrator> : MapperBase, ISaveAsOnnx
             where TCalibrator : class, ICalibrator
         {
             private TCalibrator _calibrator;
             private readonly int _scoreColIndex;
             private CalibratorTransformer<TCalibrator> _parent;
+            private string _scoreColumnName;
 
-            internal Mapper(CalibratorTransformer<TCalibrator> parent, TCalibrator calibrator, DataViewSchema inputSchema) :
+            bool ICanSaveOnnx.CanSaveOnnx(OnnxContext ctx) => _calibrator is ICanSaveOnnx onnxMapper ? onnxMapper.CanSaveOnnx(ctx) : false;
+
+            internal Mapper(CalibratorTransformer<TCalibrator> parent, TCalibrator calibrator, DataViewSchema inputSchema, string scoreColumnName) :
                 base(parent.Host, inputSchema, parent)
             {
                 _calibrator = calibrator;
                 _parent = parent;
 
-                _scoreColIndex = inputSchema.GetColumnOrNull(DefaultColumnNames.Score)?.Index ?? -1;
+                _scoreColumnName = scoreColumnName;
+                _scoreColIndex = inputSchema.GetColumnOrNull(_scoreColumnName)?.Index ?? -1;
 
-                parent.Host.Check(_scoreColIndex > 0, "The data to calibrate contains no 'Score' column");
+                parent.Host.Check(_scoreColIndex >= 0, "The data to calibrate contains no \'" + scoreColumnName + "\' column.");
             }
 
             private protected override Func<int, bool> GetDependenciesCore(Func<int, bool> activeOutput)
@@ -222,11 +262,50 @@ namespace Microsoft.ML.Calibrators
 
             private protected override void SaveModel(ModelSaveContext ctx) => _parent.SaveModel(ctx);
 
+            void ISaveAsOnnx.SaveAsOnnx(OnnxContext ctx)
+            {
+                var scoreName = InputSchema[_scoreColIndex].Name;
+                var probabilityName = GetOutputColumnsCore()[0].Name;
+                Host.CheckValue(ctx, nameof(ctx));
+                if (_calibrator is ISingleCanSaveOnnx onnx)
+                {
+                    Host.Check(onnx.CanSaveOnnx(ctx), "Cannot be saved as ONNX.");
+                    scoreName = ctx.GetVariableName(scoreName);
+                    probabilityName = ctx.AddIntermediateVariable(NumberDataViewType.Single, probabilityName);
+                    onnx.SaveAsOnnx(ctx, new[] { scoreName, probabilityName }, ""); // No need for featureColumn
+                }
+            }
+
             protected override DataViewSchema.DetachedColumn[] GetOutputColumnsCore()
             {
+                var builder = new DataViewSchema.Annotations.Builder();
+                var annotation = InputSchema[_scoreColIndex].Annotations;
+                var schema = annotation.Schema;
+
+                // We only propagate this training column metadata if it looks like it's all there, and all correct.
+                if (schema.GetColumnOrNull(AnnotationUtils.Kinds.ScoreColumnSetId) is DataViewSchema.Column setIdCol &&
+                    setIdCol.Type is KeyDataViewType setIdType && setIdType.RawType == typeof(uint) &&
+                    schema.GetColumnOrNull(AnnotationUtils.Kinds.ScoreColumnKind) is DataViewSchema.Column kindCol &&
+                    kindCol.Type is TextDataViewType &&
+                    schema.GetColumnOrNull(AnnotationUtils.Kinds.ScoreValueKind) is DataViewSchema.Column valueKindCol &&
+                    valueKindCol.Type is TextDataViewType)
+                {
+                    builder.Add(setIdCol.Name, setIdType, annotation.GetGetter<uint>(setIdCol));
+                    // Now, this next one I'm a little less sure about. It is entirely reasonable for someone to, say,
+                    // try to calibrate the result of a regression or ranker training, or something else. But should we
+                    // just pass through this class just like that? Having throught through the alternatives I view this
+                    // as the least harmful thing we could be doing, but it is something to consider I may be wrong
+                    // about if it proves that it ever causes problems to, say, have something identified as a probability
+                    // column but be marked as being a regression task, or what have you.
+                    builder.Add(kindCol.Name, kindCol.Type, annotation.GetGetter<ReadOnlyMemory<char>>(kindCol));
+                    builder.Add(valueKindCol.Name, valueKindCol.Type, annotation.GetGetter<ReadOnlyMemory<char>>(valueKindCol));
+                }
+                // Probabilities are always considered normalized.
+                builder.Add(AnnotationUtils.Kinds.IsNormalized, BooleanDataViewType.Instance, (ref bool value) => value = true);
+
                 return new[]
                 {
-                    new DataViewSchema.DetachedColumn(DefaultColumnNames.Probability, NumberDataViewType.Single, null)
+                    new DataViewSchema.DetachedColumn(DefaultColumnNames.Probability, NumberDataViewType.Single, builder.ToAnnotations())
                 };
             }
 
@@ -274,8 +353,8 @@ namespace Microsoft.ML.Calibrators
         }
 
         [BestFriend]
-        private protected override CalibratorTransformer<PlattCalibrator> Create(IHostEnvironment env, PlattCalibrator calibrator)
-            => new PlattCalibratorTransformer(env, calibrator);
+        private protected override CalibratorTransformer<PlattCalibrator> Create(IHostEnvironment env, PlattCalibrator calibrator, string scoreColumnName)
+            => new PlattCalibratorTransformer(env, calibrator, scoreColumnName);
     }
 
     /// <summary>
@@ -311,8 +390,8 @@ namespace Microsoft.ML.Calibrators
         }
 
         [BestFriend]
-        private protected override CalibratorTransformer<PlattCalibrator> Create(IHostEnvironment env, PlattCalibrator calibrator)
-            => new PlattCalibratorTransformer(env, calibrator);
+        private protected override CalibratorTransformer<PlattCalibrator> Create(IHostEnvironment env, PlattCalibrator calibrator, string scoreColumnName)
+            => new PlattCalibratorTransformer(env, calibrator, scoreColumnName);
     }
 
     /// <summary>
@@ -322,8 +401,8 @@ namespace Microsoft.ML.Calibrators
     {
         internal const string LoadName = "PlattCalibratTransf";
 
-        internal PlattCalibratorTransformer(IHostEnvironment env, PlattCalibrator calibrator)
-          : base(env, calibrator, LoadName)
+        internal PlattCalibratorTransformer(IHostEnvironment env, PlattCalibrator calibrator, string scoreColumnName)
+          : base(env, calibrator, LoadName, scoreColumnName)
         {
         }
 
@@ -362,8 +441,8 @@ namespace Microsoft.ML.Calibrators
         }
 
         [BestFriend]
-        private protected override CalibratorTransformer<NaiveCalibrator> Create(IHostEnvironment env, NaiveCalibrator calibrator)
-            => new NaiveCalibratorTransformer(env, calibrator);
+        private protected override CalibratorTransformer<NaiveCalibrator> Create(IHostEnvironment env, NaiveCalibrator calibrator, string scoreColumnName)
+            => new NaiveCalibratorTransformer(env, calibrator, scoreColumnName);
     }
 
     /// <summary>
@@ -373,8 +452,8 @@ namespace Microsoft.ML.Calibrators
     {
         internal const string LoadName = "NaiveCalibratTransf";
 
-        internal NaiveCalibratorTransformer(IHostEnvironment env, NaiveCalibrator calibrator)
-          : base(env, calibrator, LoadName)
+        internal NaiveCalibratorTransformer(IHostEnvironment env, NaiveCalibrator calibrator, string scoreColumnName)
+          : base(env, calibrator, LoadName, scoreColumnName)
         {
         }
 
@@ -411,8 +490,8 @@ namespace Microsoft.ML.Calibrators
         }
 
         [BestFriend]
-        private protected override CalibratorTransformer<IsotonicCalibrator> Create(IHostEnvironment env, IsotonicCalibrator calibrator)
-            => new IsotonicCalibratorTransformer(env, calibrator);
+        private protected override CalibratorTransformer<IsotonicCalibrator> Create(IHostEnvironment env, IsotonicCalibrator calibrator, string scoreColumnName)
+            => new IsotonicCalibratorTransformer(env, calibrator, scoreColumnName);
 
     }
 
@@ -423,8 +502,8 @@ namespace Microsoft.ML.Calibrators
     {
         internal const string LoadName = "PavCalibratTransf";
 
-        internal IsotonicCalibratorTransformer(IHostEnvironment env, IsotonicCalibrator calibrator)
-          : base(env, calibrator, LoadName)
+        internal IsotonicCalibratorTransformer(IHostEnvironment env, IsotonicCalibrator calibrator, string scoreColumnName)
+          : base(env, calibrator, LoadName, scoreColumnName)
         {
         }
 

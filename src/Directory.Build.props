@@ -21,6 +21,20 @@
     <PackageRid>$(PackageRid)-$(TargetArchitecture)</PackageRid>
   </PropertyGroup>
 
+<!-- API Compat -->
+  <PropertyGroup>
+    <RunApiCompat Condition="'$(DesignTimeBuild)' == 'true'">false</RunApiCompat>
+    <RunApiCompat Condition="'$(RunApiCompat)' == ''">$(IsStableProject)</RunApiCompat>
+    <ToolHostCmd>$(ToolsDir)dotnetcli/dotnet</ToolHostCmd>
+
+    <!-- only validate that the current implementation is compatible
+         with the old one, not vice-versa (since latest may have new
+         API missing from old) -->
+    <RunApiCompatForSrc>true</RunApiCompatForSrc>
+    <RunMatchingRefApiCompat>false</RunMatchingRefApiCompat>
+    <ApiCompatExcludeAttributeList>$(MSBuildThisFileDirectory)DefaultGenApiDocIds.txt</ApiCompatExcludeAttributeList>
+  </PropertyGroup>
+  
   <ItemGroup>
     <ProjectReference
       Condition="'$(UseMLCodeAnalyzer)' != 'false' and '$(MSBuildProjectExtension)' == '.csproj'"
@@ -30,6 +44,7 @@
     </ProjectReference>
     <PackageReference Condition="'$(UseStyleCopAnalyzer)' != 'false' and '$(MSBuildProjectExtension)' == '.csproj'"
       Include="StyleCop.Analyzers" Version="1.1.0-beta008" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.CodeAnalysis.FxCopAnalyzers" Version="3.3.0-beta2.final" PrivateAssets="All" />
   </ItemGroup>
 
   <ItemGroup>
@@ -37,5 +52,4 @@
       <Link>stylecop.json</Link>
     </AdditionalFiles>
   </ItemGroup>
-
 </Project>

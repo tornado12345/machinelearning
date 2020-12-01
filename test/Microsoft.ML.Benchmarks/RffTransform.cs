@@ -6,30 +6,29 @@ using System.IO;
 using BenchmarkDotNet.Attributes;
 using Microsoft.ML.Benchmarks.Harness;
 using Microsoft.ML.Data;
-using Microsoft.ML.RunTests;
-using Microsoft.ML.TestFramework;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Transforms;
 
 namespace Microsoft.ML.Benchmarks
 {
     [CIBenchmark]
-    public class RffTransformTrain
+    public class RffTransformTrain : BenchmarkBase
     {
-        private string _dataPath_Digits;
+        private string _dataPathDigits;
 
         [GlobalSetup]
         public void SetupTrainingSpeedTests()
         {
-            _dataPath_Digits = BaseTestClass.GetDataPath(TestDatasets.Digits.trainFilename);
+            _dataPathDigits = GetBenchmarkDataPathAndEnsureData(TestDatasets.Digits.trainFilename, TestDatasets.Digits.path);
 
-            if (!File.Exists(_dataPath_Digits))
-                throw new FileNotFoundException(string.Format(Errors.DatasetNotFound, _dataPath_Digits));
+            if (!File.Exists(_dataPathDigits))
+                throw new FileNotFoundException(string.Format(Errors.DatasetNotFound, _dataPathDigits));
         }
 
         [Benchmark]
         public void CV_Multiclass_Digits_RffTransform_OVAAveragedPerceptron()
         {
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
             var loader = mlContext.Data.CreateTextLoader(new TextLoader.Options
             {
                 Columns = new[]
@@ -41,15 +40,15 @@ namespace Microsoft.ML.Benchmarks
                 Separators = new[] {','}
             });
 
-            var data = loader.Load(_dataPath_Digits);
+            var data = loader.Load(_dataPathDigits);
 
-            var pipeline = mlContext.Transforms.RandomFourierKernelMap("FeaturesRFF", "Features")
+            var pipeline = mlContext.Transforms.ApproximatedKernelMap("FeaturesRFF", "Features")
             .AppendCacheCheckpoint(mlContext)
             .Append(mlContext.Transforms.Concatenate("Features", "FeaturesRFF"))
             .Append(new ValueToKeyMappingEstimator(mlContext, "Label"))
-            .Append(mlContext.MulticlassClassification.Trainers.OneVersusAll(mlContext.BinaryClassification.Trainers.AveragedPerceptron(numIterations: 10)));
+            .Append(mlContext.MulticlassClassification.Trainers.OneVersusAll(mlContext.BinaryClassification.Trainers.AveragedPerceptron(numberOfIterations: 10)));
 
-            var cvResults = mlContext.MulticlassClassification.CrossValidate(data, pipeline, numFolds: 5);
+            var cvResults = mlContext.MulticlassClassification.CrossValidate(data, pipeline, numberOfFolds: 5);
         }
     }
 }

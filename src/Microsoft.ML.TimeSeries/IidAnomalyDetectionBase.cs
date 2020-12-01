@@ -4,7 +4,6 @@
 
 using System;
 using System.IO;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
@@ -24,7 +23,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
         bool ITransformer.IsRowToRowMapper => ((ITransformer)InternalTransform).IsRowToRowMapper;
 
         /// <summary>
-        /// Creates a clone of the transfomer. Used for taking the snapshot of the state.
+        /// Create a clone of the transformer. Used for taking the snapshot of the state.
         /// </summary>
         /// <returns></returns>
         IStatefulTransformer IStatefulTransformer.Clone() => InternalTransform.Clone();
@@ -188,7 +187,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
 
                 private protected override double ComputeRawAnomalyScore(ref Single input, FixedSizeQueue<Single> windowedBuffer, long iteration)
                 {
-                    // This transform treats the input sequenence as the raw anomaly score.
+                    // This transform treats the input sequence as the raw anomaly score.
                     return (double)input;
                 }
 

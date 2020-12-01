@@ -4,7 +4,6 @@
 
 using System;
 using System.Collections.Generic;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.EntryPoints;
@@ -118,6 +117,18 @@ namespace Microsoft.ML.Data
         {
             Contracts.CheckValue(env, nameof(env));
             var host = env.Register("Bin");
+            host.CheckValue(input, nameof(input));
+            EntryPointUtils.CheckInputArgs(host, input);
+
+            var xf = NormalizeTransform.Create(host, input, input.Data);
+            return new CommonOutputs.TransformOutput { Model = new TransformModelImpl(env, xf, input.Data), OutputData = xf };
+        }
+
+        [TlcModule.EntryPoint(Name = "Transforms.RobustScalingNormalizer", Desc = NormalizeTransform.RobustScalingNormalizerSummary, UserName = NormalizeTransform.RobustScalingNormalizerUserName, ShortName = NormalizeTransform.RobustScalingNormalizerShortName)]
+        public static CommonOutputs.TransformOutput RobustScaling(IHostEnvironment env, NormalizeTransform.RobustScalingArguments input)
+        {
+            Contracts.CheckValue(env, nameof(env));
+            var host = env.Register("RobustScaling");
             host.CheckValue(input, nameof(input));
             EntryPointUtils.CheckInputArgs(host, input);
 

@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
@@ -33,8 +32,11 @@ namespace Microsoft.ML.Data
     /// This is a base class for wrapping <see cref="IPredictor"/>s in an <see cref="ISchemaBindableMapper"/>.
     /// </summary>
     internal abstract class SchemaBindablePredictorWrapperBase : ISchemaBindableMapper, ICanSaveModel, ICanSaveSummary,
-        IBindableCanSavePfa, IBindableCanSaveOnnx
+        IBindableCanSavePfa, IBindableCanSaveOnnx, IDisposable
     {
+        private static readonly FuncInstanceMethodInfo2<SchemaBindablePredictorWrapperBase, DataViewRow, int, Delegate> _getValueGetterMethodInfo
+            = FuncInstanceMethodInfo2<SchemaBindablePredictorWrapperBase, DataViewRow, int, Delegate>.Create(target => target.GetValueGetter<int, int>);
+
         // The ctor guarantees that Predictor is non-null. It also ensures that either
         // ValueMapper or FloatPredictor is non-null (or both). With these guarantees,
         // the score value type (_scoreType) can be determined.
@@ -125,11 +127,11 @@ namespace Microsoft.ML.Data
                 if (schema.Feature?.Type is DataViewType type)
                 {
                     // Ensure that the feature column type is compatible with the needed input type.
-                    var typeIn = ValueMapper != null ? ValueMapper.InputType : new VectorType(NumberDataViewType.Single);
+                    var typeIn = ValueMapper != null ? ValueMapper.InputType : new VectorDataViewType(NumberDataViewType.Single);
                     if (type != typeIn)
                     {
-                        VectorType typeVectorType = type as VectorType;
-                        VectorType typeInVectorType = typeIn as VectorType;
+                        VectorDataViewType typeVectorType = type as VectorDataViewType;
+                        VectorDataViewType typeInVectorType = typeIn as VectorDataViewType;
 
                         DataViewType typeItemType = typeVectorType?.ItemType ?? type;
                         DataViewType typeInItemType = typeInVectorType?.ItemType ?? typeIn;
@@ -158,9 +160,7 @@ namespace Microsoft.ML.Data
             Contracts.Assert(0 <= colSrc && colSrc < input.Schema.Count);
 
             var typeSrc = input.Schema[colSrc].Type;
-            Func<DataViewRow, int, ValueGetter<int>> del = GetValueGetter<int, int>;
-            var meth = del.GetMethodInfo().GetGenericMethodDefinition().MakeGenericMethod(typeSrc.RawType, ScoreType.RawType);
-            return (Delegate)meth.Invoke(this, new object[] { input, colSrc });
+            return Utils.MarshalInvoke(_getValueGetterMethodInfo, this, typeSrc.RawType, ScoreType.RawType, input, colSrc);
         }
 
         private ValueGetter<TDst> GetValueGetter<TSrc, TDst>(DataViewRow input, int colSrc)
@@ -194,7 +194,7 @@ namespace Microsoft.ML.Data
         /// This class doesn't care. It DOES care that the role mapped schema specifies a unique Feature column.
         /// It also requires that the output schema has ColumnCount == 1.
         /// </summary>
-        protected sealed class SingleValueRowMapper : ISchemaBoundRowMapper
+        protected sealed class SingleValueRowMapper : ISchemaBoundRowMapper, IDisposable
         {
             private readonly SchemaBindablePredictorWrapperBase _parent;
 
@@ -242,7 +242,35 @@ namespace Microsoft.ML.Data
                     getters[0] = _parent.GetPredictionGetter(input, InputRoleMappedSchema.Feature.Value.Index);
                 return new SimpleRow(OutputSchema, input, getters);
             }
+
+            #region IDisposable Support
+            private bool _disposed;
+
+            public void Dispose()
+            {
+                if (_disposed)
+                    return;
+
+                (_parent as IDisposable)?.Dispose();
+
+                _disposed = true;
+            }
+            #endregion
         }
+
+        #region IDisposable Support
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            (Predictor as IDisposable)?.Dispose();
+
+            _disposed = true;
+        }
+        #endregion
     }
 
     /// <summary>
@@ -335,8 +363,8 @@ namespace Microsoft.ML.Data
             {
                 case PredictionKind.BinaryClassification:
                     return AnnotationUtils.Const.ScoreColumnKind.BinaryClassification;
-                case PredictionKind.MultiClassClassification:
-                    return AnnotationUtils.Const.ScoreColumnKind.MultiClassClassification;
+                case PredictionKind.MulticlassClassification:
+                    return AnnotationUtils.Const.ScoreColumnKind.MulticlassClassification;
                 case PredictionKind.Regression:
                     return AnnotationUtils.Const.ScoreColumnKind.Regression;
                 case PredictionKind.MultiOutputRegression:
@@ -427,8 +455,15 @@ namespace Microsoft.ML.Data
 
             var mapper = ValueMapper as ISingleCanSaveOnnx;
             Contracts.CheckValue(mapper, nameof(mapper));
-            Contracts.Assert(schema.Feature.HasValue);
-            Contracts.Assert(Utils.Size(outputNames) == 3); // Predicted Label, Score and Probablity.
+            Contracts.Assert(Utils.Size(outputNames) == 3); // Predicted Label, Score and Probability.
+
+            // Prior doesn't have a feature column and uses the training label column to determine predicted labels
+            if (!schema.Feature.HasValue)
+            {
+                Contracts.Assert(schema.Label.HasValue);
+                var labelColumnName = schema.Label.Value.Name;
+                return mapper.SaveAsOnnx(ctx, outputNames, ctx.GetVariableName(labelColumnName));
+            }
 
             var featName = schema.Feature.Value.Name;
             if (!ctx.ContainsColumn(featName))
@@ -448,7 +483,7 @@ namespace Microsoft.ML.Data
             // REVIEW: In theory the restriction on input type could be relaxed at the expense
             // of more complicated code in CalibratedRowMapper.GetGetters. Not worth it at this point
             // and no good way to test it.
-            Contracts.Check(distMapper.InputType is VectorType vectorType && vectorType.ItemType == NumberDataViewType.Single,
+            Contracts.Check(distMapper.InputType is VectorDataViewType vectorType && vectorType.ItemType == NumberDataViewType.Single,
                 "Invalid input type for the IValueMapperDist");
             Contracts.Check(distMapper.DistType == NumberDataViewType.Single,
                 "Invalid probability type for the IValueMapperDist");
@@ -491,7 +526,7 @@ namespace Microsoft.ML.Data
 
                 if (schema.Feature?.Type is DataViewType typeSrc)
                 {
-                    Contracts.Check(typeSrc is VectorType vectorType
+                    Contracts.Check(typeSrc is VectorDataViewType vectorType
                         && vectorType.IsKnownSize
                         && vectorType.ItemType == NumberDataViewType.Single,
                         "Invalid feature column type");
@@ -512,7 +547,7 @@ namespace Microsoft.ML.Data
 
             public IEnumerable<KeyValuePair<RoleMappedSchema.ColumnRole, string>> GetInputColumnRoles()
             {
-                yield return RoleMappedSchema.ColumnRole.Feature.Bind(InputRoleMappedSchema.Feature?.Name);
+                yield return (InputRoleMappedSchema.Feature.HasValue) ? RoleMappedSchema.ColumnRole.Feature.Bind(InputRoleMappedSchema.Feature?.Name) : RoleMappedSchema.ColumnRole.Label.Bind(InputRoleMappedSchema.Label?.Name);
             }
 
             private Delegate[] CreateGetters(DataViewRow input, bool[] active)
@@ -611,7 +646,7 @@ namespace Microsoft.ML.Data
             Contracts.CheckParam(qpred != null, nameof(predictor), "Predictor doesn't implement " + nameof(IQuantileValueMapper));
             _qpred = qpred;
             Contracts.CheckParam(ScoreType == NumberDataViewType.Single, nameof(predictor), "Unexpected predictor output type");
-            Contracts.CheckParam(ValueMapper != null && ValueMapper.InputType is VectorType vectorType
+            Contracts.CheckParam(ValueMapper != null && ValueMapper.InputType is VectorDataViewType vectorType
                 && vectorType.ItemType == NumberDataViewType.Single,
                 nameof(predictor), "Unexpected predictor input type");
             Contracts.CheckNonEmpty(quantiles, nameof(quantiles), "Quantiles must not be empty");
@@ -630,7 +665,7 @@ namespace Microsoft.ML.Data
             Contracts.CheckDecode(qpred != null);
             _qpred = qpred;
             Contracts.CheckDecode(ScoreType == NumberDataViewType.Single);
-            Contracts.CheckDecode(ValueMapper != null && ValueMapper.InputType is VectorType vectorType
+            Contracts.CheckDecode(ValueMapper != null && ValueMapper.InputType is VectorDataViewType vectorType
                 && vectorType.ItemType == NumberDataViewType.Single);
             _quantiles = ctx.Reader.ReadDoubleArray();
             Contracts.CheckDecode(Utils.Size(_quantiles) > 0);
@@ -666,7 +701,7 @@ namespace Microsoft.ML.Data
             Contracts.Assert(0 <= colSrc && colSrc < input.Schema.Count);
 
             var column = input.Schema[colSrc];
-            var typeSrc = column.Type as VectorType;
+            var typeSrc = column.Type as VectorDataViewType;
             Contracts.Assert(typeSrc != null && typeSrc.ItemType == NumberDataViewType.Single);
             Contracts.Assert(ValueMapper == null ||
                 typeSrc.Size == ValueMapper.InputType.GetVectorSize() || ValueMapper.InputType.GetVectorSize() == 0);

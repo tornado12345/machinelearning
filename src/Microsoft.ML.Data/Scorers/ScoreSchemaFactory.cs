@@ -3,7 +3,6 @@
 // See the LICENSE file in the project root for more information.
 
 using System;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Runtime;
 
 namespace Microsoft.ML.Data
@@ -85,7 +84,7 @@ namespace Microsoft.ML.Data
             Contracts.AssertValue(quantiles);
 
             // Create a schema using standard function. The produced schema will be modified by adding one metadata column.
-            var partialSchema = Create(new VectorType(scoreType as PrimitiveDataViewType, quantiles.Length), AnnotationUtils.Const.ScoreColumnKind.QuantileRegression);
+            var partialSchema = Create(new VectorDataViewType(scoreType as PrimitiveDataViewType, quantiles.Length), AnnotationUtils.Const.ScoreColumnKind.QuantileRegression);
 
             var metadataBuilder = new DataViewSchema.Annotations.Builder();
             // Add the extra metadata.
@@ -113,7 +112,7 @@ namespace Microsoft.ML.Data
         /// <param name="scoreColumnKindValue">A metadata value of score column. It's the value associated with key
         /// <see cref="AnnotationUtils.Kinds.ScoreColumnKind"/>.</param>
         /// <param name="keyNames">Sequence predictor usually generates integer outputs. This field tells the tags of all possible output values.
-        /// For example, output integer 0 cound be mapped to "Sell" and 0 to "Buy" when predicting stock trend.</param>
+        /// For example, output integer 0 could be mapped to "Sell" and 0 to "Buy" when predicting stock trend.</param>
         /// <returns><see cref="DataViewSchema"/> of sequence predictor's output.</returns>
         public static DataViewSchema CreateSequencePredictionSchema(DataViewType scoreType, string scoreColumnKindValue, VBuffer<ReadOnlyMemory<char>> keyNames=default)
         {

@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -131,7 +130,7 @@ namespace Microsoft.ML.Data
             if (Utils.Size(transformArgs) == 0)
                 return srcLoader;
 
-            string GetTagData(IComponentFactory<IDataView, IDataTransform> factory)
+            static string GetTagData(IComponentFactory<IDataView, IDataTransform> factory)
             {
                 // When coming from the command line, preserve the string arguments.
                 // For other factories, we aren't able to get the string.
@@ -599,7 +598,7 @@ namespace Microsoft.ML.Data
             return View.GetRowCursorSet(columnsNeeded, n, rand);
         }
 
-        VectorType ITransposeDataView.GetSlotType(int col) => _tview?.GetSlotType(col);
+        VectorDataViewType ITransposeDataView.GetSlotType(int col) => _tview?.GetSlotType(col);
 
         SlotCursor ITransposeDataView.GetSlotCursor(int col)
         {

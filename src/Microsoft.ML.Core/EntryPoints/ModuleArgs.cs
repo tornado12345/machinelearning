@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Runtime;
 
@@ -123,7 +122,7 @@ namespace Microsoft.ML.EntryPoints
             public string Desc { get; set; }
 
             /// <summary>
-            /// The rank order of the output. Because .NET reflection returns members in an unspecfied order, this
+            /// The rank order of the output. Because .NET reflection returns members in an unspecified order, this
             /// is the only way to ensure consistency.
             /// </summary>
             public Double SortOrder { get; set; }

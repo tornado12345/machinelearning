@@ -9,7 +9,6 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -19,7 +18,6 @@ using Microsoft.ML.Runtime;
 using Parquet;
 using Parquet.Data;
 using Parquet.File.Values.Primitives;
-using DataViewSchema = Microsoft.Data.DataView.DataViewSchema;
 
 [assembly: LoadableClass(ParquetLoader.Summary, typeof(ParquetLoader), typeof(ParquetLoader.Arguments), typeof(SignatureDataLoader),
     ParquetLoader.LoaderName, ParquetLoader.LoaderSignature, ParquetLoader.ShortName)]
@@ -79,10 +77,10 @@ namespace Microsoft.ML.Data
 
         public sealed class Arguments
         {
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Number of column chunk values to cache while reading from parquet file", ShortName = "chunkSize")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Number of column chunk values to cache while reading from parquet file", ShortName = "chunkSize")]
             public int ColumnChunkReadSize = _defaultColumnChunkReadSize;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "If true, will read large numbers as dates", ShortName = "bigIntDates")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "If true, will read large numbers as dates", ShortName = "bigIntDates")]
             public bool TreatBigIntegersAsDates = true;
         }
 
@@ -313,12 +311,12 @@ namespace Microsoft.ML.Data
         /// <param name="ectx">The exception context.</param>
         /// <param name="cols">The columns.</param>
         /// <returns>The resulting schema.</returns>
-        private Microsoft.Data.DataView.DataViewSchema CreateSchema(IExceptionContext ectx, Column[] cols)
+        private DataViewSchema CreateSchema(IExceptionContext ectx, Column[] cols)
         {
             Contracts.AssertValue(ectx);
             Contracts.AssertValue(cols);
             var builder = new DataViewSchema.Builder();
-            builder.AddColumns(cols.Select(c => new Microsoft.Data.DataView.DataViewSchema.DetachedColumn(c.Name, c.ColType, null)));
+            builder.AddColumns(cols.Select(c => new DataViewSchema.DetachedColumn(c.Name, c.ColType, null)));
             return builder.ToSchema();
         }
 
@@ -352,7 +350,7 @@ namespace Microsoft.ML.Data
                 case DataType.Int96:
                     return RowIdDataViewType.Instance;
                 case DataType.ByteArray:
-                    return new VectorType(NumberDataViewType.Byte);
+                    return new VectorDataViewType(NumberDataViewType.Byte);
                 case DataType.String:
                     return TextDataViewType.Instance;
                 case DataType.Float:
@@ -586,7 +584,7 @@ namespace Microsoft.ML.Data
                 return false;
             }
 
-            public override Microsoft.Data.DataView.DataViewSchema Schema => _loader.Schema;
+            public override DataViewSchema Schema => _loader.Schema;
 
             public override long Batch => 0;
 
@@ -601,9 +599,11 @@ namespace Microsoft.ML.Data
             {
                 Ch.CheckParam(IsColumnActive(column), nameof(column), "requested column not active");
 
-                var getter = _getters[_colToActivesIndex[column.Index]] as ValueGetter<TValue>;
+                var originGetter = _getters[_colToActivesIndex[column.Index]];
+                var getter = originGetter as ValueGetter<TValue>;
                 if (getter == null)
-                    throw Ch.Except("Invalid TValue: '{0}'", typeof(TValue));
+                    throw Ch.Except($"Invalid TValue: '{typeof(TValue)}', " +
+                            $"expected type: '{originGetter.GetType().GetGenericArguments().First()}'.");
 
                 return getter;
             }

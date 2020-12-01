@@ -5,7 +5,6 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -48,16 +47,16 @@ namespace Microsoft.ML.Transforms.Text
             public int? NgramLength;
 
             [Argument(ArgumentType.AtMostOnce,
-                HelpText = "Maximum number of tokens to skip when constructing an ngram",
+                HelpText = "Maximum number of tokens to skip when constructing an n-gram",
                 ShortName = "skips")]
             public int? SkipLength;
 
             [Argument(ArgumentType.AtMostOnce,
-                HelpText = "Whether to include all ngram lengths up to " + nameof(NgramLength) + " or only " + nameof(NgramLength),
-                ShortName = "all")]
-            public bool? AllLengths;
+                HelpText = "Whether to include all n-gram lengths up to " + nameof(NgramLength) + " or only " + nameof(NgramLength),
+                Name = "AllLengths", ShortName = "all")]
+            public bool? UseAllLengths;
 
-            [Argument(ArgumentType.Multiple, HelpText = "Maximum number of ngrams to store in the dictionary", ShortName = "max")]
+            [Argument(ArgumentType.Multiple, HelpText = "Maximum number of n-grams to store in the dictionary", ShortName = "max")]
             public int[] MaxNumTerms = null;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Statistical measure used to evaluate how important a word is to a document in a corpus")]
@@ -76,7 +75,7 @@ namespace Microsoft.ML.Transforms.Text
             internal bool TryUnparse(StringBuilder sb)
             {
                 Contracts.AssertValue(sb);
-                if (NgramLength != null || SkipLength != null || AllLengths != null || Utils.Size(MaxNumTerms) > 0 ||
+                if (NgramLength != null || SkipLength != null || UseAllLengths != null || Utils.Size(MaxNumTerms) > 0 ||
                     Weighting != null)
                 {
                     return false;
@@ -93,15 +92,14 @@ namespace Microsoft.ML.Transforms.Text
 
         private const string RegistrationName = "WordBagTransform";
 
-        internal const string Summary = "Produces a bag of counts of ngrams (sequences of consecutive words of length 1-n) in a given text. It does so by building "
-            + "a dictionary of ngrams and using the id in the dictionary as the index in the bag.";
+        internal const string Summary = "Produces a bag of counts of n-grams (sequences of consecutive words of length 1-n) in a given text. It does so by building "
+            + "a dictionary of n-grams and using the id in the dictionary as the index in the bag.";
 
-        internal static IDataTransform Create(IHostEnvironment env, Options options, IDataView input)
+        internal static IEstimator<ITransformer> CreateEstimator(IHostEnvironment env, Options options, SchemaShape inputSchema)
         {
             Contracts.CheckValue(env, nameof(env));
             var h = env.Register(RegistrationName);
             h.CheckValue(options, nameof(options));
-            h.CheckValue(input, nameof(input));
             h.CheckUserArg(Utils.Size(options.Columns) > 0, nameof(options.Columns), "Columns must be specified");
 
             // Compose the WordBagTransform from a tokenize transform,
@@ -109,7 +107,7 @@ namespace Microsoft.ML.Transforms.Text
             // Since WordBagTransform is a many-to-one column transform, for each
             // WordBagTransform.Column with multiple sources, we first apply a ConcatTransform.
 
-            // REVIEW: In order to not get ngrams that cross between vector slots, we need to
+            // REVIEW: In order to not get n-grams that cross between vector slots, we need to
             // enable tokenize transforms to insert a special token between slots.
 
             // REVIEW: In order to make it possible to output separate bags for different columns
@@ -123,7 +121,7 @@ namespace Microsoft.ML.Transforms.Text
                     MaxNumTerms = options.MaxNumTerms,
                     NgramLength = options.NgramLength,
                     SkipLength = options.SkipLength,
-                    AllLengths = options.AllLengths,
+                    UseAllLengths = options.UseAllLengths,
                     Weighting = options.Weighting,
                     Columns = new NgramExtractorTransform.Column[options.Columns.Length]
                 };
@@ -146,20 +144,23 @@ namespace Microsoft.ML.Transforms.Text
                         NgramLength = column.NgramLength,
                         SkipLength = column.SkipLength,
                         Weighting = column.Weighting,
-                        AllLengths = column.AllLengths
+                        UseAllLengths = column.UseAllLengths
                     };
             }
 
-            IDataView view = input;
-            view = NgramExtractionUtils.ApplyConcatOnSources(h, options.Columns, view);
-            view = new WordTokenizingEstimator(env, tokenizeColumns).Fit(view).Transform(view);
-            return NgramExtractorTransform.Create(h, extractorArgs, view);
+            IEstimator<ITransformer> estimator = NgramExtractionUtils.GetConcatEstimator(h, options.Columns);
+            estimator = estimator.Append(new WordTokenizingEstimator(env, tokenizeColumns));
+            estimator = estimator.Append(NgramExtractorTransform.CreateEstimator(h, extractorArgs, estimator.GetOutputSchema(inputSchema)));
+            return estimator;
         }
+
+        internal static IDataTransform Create(IHostEnvironment env, Options options, IDataView input) =>
+            (IDataTransform)CreateEstimator(env, options, SchemaShape.Create(input.Schema)).Fit(input).Transform(input);
     }
 
     /// <summary>
     /// A transform that turns a collection of tokenized text (vector of ReadOnlyMemory), or vectors of keys into numerical
-    /// feature vectors. The feature vectors are counts of ngrams (sequences of consecutive *tokens* -words or keys-
+    /// feature vectors. The feature vectors are counts of n-grams (sequences of consecutive *tokens* -words or keys-
     /// of length 1-n).
     /// </summary>
     internal static class NgramExtractorTransform
@@ -170,18 +171,19 @@ namespace Microsoft.ML.Transforms.Text
             public int? NgramLength;
 
             [Argument(ArgumentType.AtMostOnce,
-                HelpText = "Maximum number of tokens to skip when constructing an ngram",
+                HelpText = "Maximum number of tokens to skip when constructing an n-gram",
                 ShortName = "skips")]
             public int? SkipLength;
 
             [Argument(ArgumentType.AtMostOnce, HelpText =
-                "Whether to include all ngram lengths up to " + nameof(NgramLength) + " or only " + nameof(NgramLength), ShortName = "all")]
-            public bool? AllLengths;
+                "Whether to include all n-gram lengths up to " + nameof(NgramLength) + " or only " + nameof(NgramLength),
+                Name = "AllLengths", ShortName = "all")]
+            public bool? UseAllLengths;
 
-            // REVIEW: This argument is actually confusing. If you set only one value we will use this value for all ngrams respectfully for example,
-            // if we specify 3 ngrams we will have maxNumTerms * 3. And it also pick first value from this array to run term transform, so if you specify
+            // REVIEW: This argument is actually confusing. If you set only one value we will use this value for all n-grams respectfully for example,
+            // if we specify 3 n-grams we will have maxNumTerms * 3. And it also pick first value from this array to run term transform, so if you specify
             // something like 1,1,10000, term transform would be run with limitation of only one term.
-            [Argument(ArgumentType.Multiple, HelpText = "Maximum number of ngrams to store in the dictionary", ShortName = "max")]
+            [Argument(ArgumentType.Multiple, HelpText = "Maximum number of n-grams to store in the dictionary", ShortName = "max")]
             public int[] MaxNumTerms = null;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "The weighting criteria")]
@@ -200,7 +202,7 @@ namespace Microsoft.ML.Transforms.Text
             internal bool TryUnparse(StringBuilder sb)
             {
                 Contracts.AssertValue(sb);
-                if (NgramLength != null || SkipLength != null || AllLengths != null || Utils.Size(MaxNumTerms) > 0 ||
+                if (NgramLength != null || SkipLength != null || UseAllLengths != null || Utils.Size(MaxNumTerms) > 0 ||
                     Weighting != null)
                 {
                     return false;
@@ -219,17 +221,17 @@ namespace Microsoft.ML.Transforms.Text
             public int NgramLength = 1;
 
             [Argument(ArgumentType.AtMostOnce,
-                HelpText = "Maximum number of tokens to skip when constructing an ngram",
+                HelpText = "Maximum number of tokens to skip when constructing an n-gram",
                 ShortName = "skips")]
             public int SkipLength = NgramExtractingEstimator.Defaults.SkipLength;
 
             [Argument(ArgumentType.AtMostOnce,
-                HelpText = "Whether to include all ngram lengths up to " + nameof(NgramLength) + " or only " + nameof(NgramLength),
-                ShortName = "all")]
-            public bool AllLengths = NgramExtractingEstimator.Defaults.AllLengths;
+                HelpText = "Whether to include all n-gram lengths up to " + nameof(NgramLength) + " or only " + nameof(NgramLength),
+                Name = "AllLengths", ShortName = "all")]
+            public bool UseAllLengths = NgramExtractingEstimator.Defaults.UseAllLengths;
 
-            [Argument(ArgumentType.Multiple, HelpText = "Maximum number of ngrams to store in the dictionary", ShortName = "max")]
-            public int[] MaxNumTerms = new int[] { NgramExtractingEstimator.Defaults.MaxNumTerms };
+            [Argument(ArgumentType.Multiple, HelpText = "Maximum number of n-grams to store in the dictionary", ShortName = "max")]
+            public int[] MaxNumTerms = new int[] { NgramExtractingEstimator.Defaults.MaximumNgramsCount };
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "The weighting criteria")]
             public NgramExtractingEstimator.WeightingCriteria Weighting = NgramExtractingEstimator.Defaults.Weighting;
@@ -252,20 +254,19 @@ namespace Microsoft.ML.Transforms.Text
         }
 
         internal const string Summary = "A transform that turns a collection of tokenized text ReadOnlyMemory, or vectors of keys into numerical " +
-            "feature vectors. The feature vectors are counts of ngrams (sequences of consecutive *tokens* -words or keys- of length 1-n).";
+            "feature vectors. The feature vectors are counts of n-grams (sequences of consecutive *tokens* -words or keys- of length 1-n).";
 
         internal const string LoaderSignature = "NgramExtractor";
 
-        internal static IDataTransform Create(IHostEnvironment env, Options options, IDataView input,
-            TermLoaderArguments termLoaderArgs = null)
+        internal static IEstimator<ITransformer> CreateEstimator(IHostEnvironment env, Options options, SchemaShape inputSchema, TermLoaderArguments termLoaderArgs = null)
         {
             Contracts.CheckValue(env, nameof(env));
             var h = env.Register(LoaderSignature);
             h.CheckValue(options, nameof(options));
-            h.CheckValue(input, nameof(input));
             h.CheckUserArg(Utils.Size(options.Columns) > 0, nameof(options.Columns), "Columns must be specified");
 
-            IDataView view = input;
+            var chain = new EstimatorChain<ITransformer>();
+
             var termCols = new List<Column>();
             var isTermCol = new bool[options.Columns.Length];
 
@@ -275,9 +276,8 @@ namespace Microsoft.ML.Transforms.Text
 
                 h.CheckNonWhiteSpace(col.Name, nameof(col.Name));
                 h.CheckNonWhiteSpace(col.Source, nameof(col.Source));
-                int colId;
-                if (input.Schema.TryGetColumnIndex(col.Source, out colId) &&
-                    input.Schema[colId].Type.GetItemType() is TextDataViewType)
+                if (inputSchema.TryFindColumn(col.Source, out var colShape) &&
+                    colShape.ItemType is TextDataViewType)
                 {
                     termCols.Add(col);
                     isTermCol[i] = true;
@@ -285,59 +285,45 @@ namespace Microsoft.ML.Transforms.Text
             }
 
             // If the column types of args.column are text, apply term transform to convert them to keys.
-            // Otherwise, skip term transform and apply ngram transform directly.
+            // Otherwise, skip term transform and apply n-gram transform directly.
             // This logic allows NgramExtractorTransform to handle both text and key input columns.
-            // Note: ngram transform handles the validation of the types natively (in case the types
+            // Note: n-gram transform handles the validation of the types natively (in case the types
             // of args.column are not text nor keys).
             if (termCols.Count > 0)
             {
-                ValueToKeyMappingTransformer.Options termArgs = null;
-                string[] missingDropColumns = null;
-                if (termLoaderArgs != null)
-                {
-                    termArgs =
-                        new ValueToKeyMappingTransformer.Options()
-                        {
-                            MaxNumTerms = int.MaxValue,
-                            Term = termLoaderArgs.Term,
-                            Terms = termLoaderArgs.Terms,
-                            DataFile = termLoaderArgs.DataFile,
-                            Loader = termLoaderArgs.Loader,
-                            TermsColumn = termLoaderArgs.TermsColumn,
-                            Sort = termLoaderArgs.Sort,
-                            Columns = new ValueToKeyMappingTransformer.Column[termCols.Count]
-                        };
-                    if (termLoaderArgs.DropUnknowns)
-                        missingDropColumns = new string[termCols.Count];
-                }
-                else
-                {
-                    termArgs =
-                        new ValueToKeyMappingTransformer.Options()
-                        {
-                            MaxNumTerms = Utils.Size(options.MaxNumTerms) > 0 ? options.MaxNumTerms[0] : NgramExtractingEstimator.Defaults.MaxNumTerms,
-                            Columns = new ValueToKeyMappingTransformer.Column[termCols.Count]
-                        };
-                }
+                var columnOptions = new List<ValueToKeyMappingEstimator.ColumnOptionsBase>();
+                string[] missingDropColumns = termLoaderArgs != null && termLoaderArgs.DropUnknowns ? new string[termCols.Count] : null;
 
                 for (int iinfo = 0; iinfo < termCols.Count; iinfo++)
                 {
                     var column = termCols[iinfo];
-                    termArgs.Columns[iinfo] =
-                        new ValueToKeyMappingTransformer.Column()
-                        {
-                            Name = column.Name,
-                            Source = column.Source,
-                            MaxNumTerms = Utils.Size(column.MaxNumTerms) > 0 ? column.MaxNumTerms[0] : default(int?)
-                        };
+                    var colOptions = new ValueToKeyMappingEstimator.ColumnOptions(
+                        column.Name,
+                        column.Source,
+                        maximumNumberOfKeys: Utils.Size(column.MaxNumTerms) > 0 ? column.MaxNumTerms[0] :
+                        Utils.Size(options.MaxNumTerms) > 0 ? options.MaxNumTerms[0] :
+                        termLoaderArgs == null ? NgramExtractingEstimator.Defaults.MaximumNgramsCount : int.MaxValue,
+                        keyOrdinality: termLoaderArgs?.Sort ?? ValueToKeyMappingEstimator.KeyOrdinality.ByOccurrence);
+                    if (termLoaderArgs != null)
+                    {
+                        colOptions.Key = termLoaderArgs.Term;
+                        colOptions.Keys = termLoaderArgs.Terms;
+                    }
+                    columnOptions.Add(colOptions);
 
                     if (missingDropColumns != null)
                         missingDropColumns[iinfo] = column.Name;
                 }
 
-                view = ValueToKeyMappingTransformer.Create(h, termArgs, view);
+                IDataView keyData = null;
+                if (termLoaderArgs?.DataFile != null)
+                {
+                    using (var ch = env.Start("Create key data view"))
+                        keyData = ValueToKeyMappingTransformer.GetKeyDataViewOrNull(env, ch, termLoaderArgs.DataFile, termLoaderArgs.TermsColumn, termLoaderArgs.Loader, out var autoConvert);
+                }
+                chain = chain.Append<ITransformer>(new ValueToKeyMappingEstimator(h, columnOptions.ToArray(), keyData));
                 if (missingDropColumns != null)
-                    view = new MissingValueDroppingTransformer(h, missingDropColumns.Select(x => (x, x)).ToArray()).Transform(view);
+                    chain = chain.Append<ITransformer>(new MissingValueDroppingEstimator(h, missingDropColumns.Select(x => (x, x)).ToArray()));
             }
 
             var ngramColumns = new NgramExtractingEstimator.ColumnOptions[options.Columns.Length];
@@ -347,27 +333,25 @@ namespace Microsoft.ML.Transforms.Text
                 ngramColumns[iinfo] = new NgramExtractingEstimator.ColumnOptions(column.Name,
                     column.NgramLength ?? options.NgramLength,
                     column.SkipLength ?? options.SkipLength,
-                    column.AllLengths ?? options.AllLengths,
+                    column.UseAllLengths ?? options.UseAllLengths,
                     column.Weighting ?? options.Weighting,
                     column.MaxNumTerms ?? options.MaxNumTerms,
                     isTermCol[iinfo] ? column.Name : column.Source
                     );
             }
-
-            return new NgramExtractingEstimator(env, ngramColumns).Fit(view).Transform(view) as IDataTransform;
+            return chain.Append<ITransformer>(new NgramExtractingEstimator(env, ngramColumns));
         }
 
-        internal static IDataTransform Create(IHostEnvironment env, NgramExtractorArguments extractorArgs, IDataView input,
-            ExtractorColumn[] cols, TermLoaderArguments termLoaderArgs = null)
+        internal static IDataTransform CreateDataTransform(IHostEnvironment env, Options options, IDataView input,
+            TermLoaderArguments termLoaderArgs = null)
         {
             Contracts.CheckValue(env, nameof(env));
-            var h = env.Register(LoaderSignature);
-            h.CheckValue(extractorArgs, nameof(extractorArgs));
-            h.CheckValue(input, nameof(input));
-            h.CheckUserArg(extractorArgs.SkipLength < extractorArgs.NgramLength, nameof(extractorArgs.SkipLength), "Should be less than " + nameof(extractorArgs.NgramLength));
-            h.CheckUserArg(Utils.Size(cols) > 0, nameof(Options.Columns), "Must be specified");
-            h.CheckValueOrNull(termLoaderArgs);
+            env.CheckValue(input, nameof(input));
+            return CreateEstimator(env, options, SchemaShape.Create(input.Schema), termLoaderArgs).Fit(input).Transform(input)/* Create(env, options, input, termLoaderArgs).Transform(input) */as IDataTransform;
+        }
 
+        internal static Options CreateNgramExtractorOptions(NgramExtractorArguments extractorArgs, ExtractorColumn[] cols)
+        {
             var extractorCols = new Column[cols.Length];
             for (int i = 0; i < cols.Length; i++)
             {
@@ -380,12 +364,11 @@ namespace Microsoft.ML.Transforms.Text
                 Columns = extractorCols,
                 NgramLength = extractorArgs.NgramLength,
                 SkipLength = extractorArgs.SkipLength,
-                AllLengths = extractorArgs.AllLengths,
+                UseAllLengths = extractorArgs.UseAllLengths,
                 MaxNumTerms = extractorArgs.MaxNumTerms,
                 Weighting = extractorArgs.Weighting
             };
-
-            return Create(h, options, input, termLoaderArgs);
+            return options;
         }
 
         internal static INgramExtractorFactory Create(IHostEnvironment env, NgramExtractorArguments extractorArgs,
@@ -423,14 +406,14 @@ namespace Microsoft.ML.Transforms.Text
 
         [Argument(ArgumentType.AtMostOnce, HelpText = "How items should be ordered when vectorized. By default, they will be in the order encountered. " +
             "If by value, items are sorted according to their default comparison, for example, text sorting will be case sensitive (for example, 'A' then 'Z' then 'a').", SortOrder = 5)]
-        public ValueToKeyMappingEstimator.SortOrder Sort = ValueToKeyMappingEstimator.SortOrder.Occurrence;
+        public ValueToKeyMappingEstimator.KeyOrdinality Sort = ValueToKeyMappingEstimator.KeyOrdinality.ByOccurrence;
 
         [Argument(ArgumentType.AtMostOnce, HelpText = "Drop unknown terms instead of mapping them to NA term.", ShortName = "dropna", SortOrder = 6)]
         public bool DropUnknowns = false;
     }
 
     /// <summary>
-    /// An ngram extractor factory interface to create an ngram extractor transform.
+    /// An n-gram extractor factory interface to create an n-gram extractor transform.
     /// </summary>
     internal interface INgramExtractorFactory
     {
@@ -440,7 +423,7 @@ namespace Microsoft.ML.Transforms.Text
         /// </summary>
         bool UseHashingTrick { get; }
 
-        IDataTransform Create(IHostEnvironment env, IDataView input, ExtractorColumn[] cols);
+        ITransformer Create(IHostEnvironment env, IDataView input, ExtractorColumn[] cols);
     }
 
     [TlcModule.ComponentKind("NgramExtractor")]
@@ -465,9 +448,10 @@ namespace Microsoft.ML.Transforms.Text
             _termLoaderArgs = termLoaderArgs;
         }
 
-        public IDataTransform Create(IHostEnvironment env, IDataView input, ExtractorColumn[] cols)
+        public ITransformer Create(IHostEnvironment env, IDataView input, ExtractorColumn[] cols)
         {
-            return NgramExtractorTransform.Create(env, _extractorArgs, input, cols, _termLoaderArgs);
+            var options = NgramExtractorTransform.CreateNgramExtractorOptions(_extractorArgs, cols);
+            return NgramExtractorTransform.CreateEstimator(env, options, SchemaShape.Create(input.Schema), _termLoaderArgs).Fit(input);
         }
     }
 
@@ -477,35 +461,29 @@ namespace Microsoft.ML.Transforms.Text
     internal class NgramHashExtractorFactory : INgramExtractorFactory
     {
         private readonly NgramHashExtractingTransformer.NgramHashExtractorArguments _extractorArgs;
-        private readonly TermLoaderArguments _termLoaderArgs;
 
         public bool UseHashingTrick { get { return true; } }
 
-        public NgramHashExtractorFactory(NgramHashExtractingTransformer.NgramHashExtractorArguments extractorArgs,
-            TermLoaderArguments customTermsArgs = null)
+        public NgramHashExtractorFactory(NgramHashExtractingTransformer.NgramHashExtractorArguments extractorArgs)
         {
             Contracts.CheckValue(extractorArgs, nameof(extractorArgs));
-            Contracts.CheckValueOrNull(customTermsArgs);
             _extractorArgs = extractorArgs;
-            _termLoaderArgs = customTermsArgs;
         }
 
-        public IDataTransform Create(IHostEnvironment env, IDataView input, ExtractorColumn[] cols)
+        public ITransformer Create(IHostEnvironment env, IDataView input, ExtractorColumn[] cols)
         {
-            return NgramHashExtractingTransformer.Create(_extractorArgs, env, input, cols, _termLoaderArgs);
+            return NgramHashExtractingTransformer.Create(_extractorArgs, env, input, cols);
         }
     }
 
     internal static class NgramExtractionUtils
     {
-        public static IDataView ApplyConcatOnSources(IHostEnvironment env, ManyToOneColumn[] columns, IDataView input)
+        public static IEstimator<ITransformer> GetConcatEstimator(IHostEnvironment env, ManyToOneColumn[] columns)
         {
             Contracts.CheckValue(env, nameof(env));
             env.CheckValue(columns, nameof(columns));
-            env.CheckValue(input, nameof(input));
 
-            IDataView view = input;
-            var concatColumns = new List<ColumnConcatenatingTransformer.ColumnOptions>();
+            var estimator = new EstimatorChain<ITransformer>();
             foreach (var col in columns)
             {
                 env.CheckUserArg(col != null, nameof(WordBagBuildingTransformer.Options.Columns));
@@ -513,12 +491,9 @@ namespace Microsoft.ML.Transforms.Text
                 env.CheckUserArg(Utils.Size(col.Source) > 0, nameof(col.Source));
                 env.CheckUserArg(col.Source.All(src => !string.IsNullOrWhiteSpace(src)), nameof(col.Source));
                 if (col.Source.Length > 1)
-                    concatColumns.Add(new ColumnConcatenatingTransformer.ColumnOptions(col.Name, col.Source));
+                    estimator = estimator.Append<ITransformer>(new ColumnConcatenatingEstimator(env, col.Name, col.Source));
             }
-            if (concatColumns.Count > 0)
-                return new ColumnConcatenatingTransformer(env, concatColumns.ToArray()).Transform(view);
-
-            return view;
+            return estimator;
         }
 
         /// <summary>

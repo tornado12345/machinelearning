@@ -7,11 +7,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Model.Pfa;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Transforms;
@@ -32,10 +32,7 @@ using Newtonsoft.Json.Linq;
 namespace Microsoft.ML.Transforms
 {
     /// <summary>
-    /// KeyToValueTransform utilizes KeyValues metadata to map key indices to the corresponding values in the KeyValues metadata.
-    /// Notes:
-    /// * Output columns utilize the KeyValues metadata.
-    /// * Maps zero values of the key type to the NA of the output type.
+    /// <see cref="ITransformer"/> resulting from fitting a <see cref="KeyToValueMappingEstimator"/>.
     /// </summary>
     public sealed class KeyToValueMappingTransformer : OneToOneTransformerBase
     {
@@ -69,7 +66,7 @@ namespace Microsoft.ML.Transforms
         [BestFriend]
         internal const string UserName = "Key To Value Transform";
 
-        public IReadOnlyCollection<(string outputColumnName, string inputColumnName)> Columns => ColumnPairs.AsReadOnly();
+        internal IReadOnlyCollection<(string outputColumnName, string inputColumnName)> Columns => ColumnPairs.AsReadOnly();
 
         private static VersionInfo GetVersionInfo()
         {
@@ -156,7 +153,7 @@ namespace Microsoft.ML.Transforms
 
         private protected override IRowMapper MakeRowMapper(DataViewSchema inputSchema) => new Mapper(this, inputSchema);
 
-        private sealed class Mapper : OneToOneMapperBase, ISaveAsPfa
+        private sealed class Mapper : OneToOneMapperBase, ISaveAsPfa, ISaveAsOnnx
         {
             private readonly KeyToValueMappingTransformer _parent;
             private readonly DataViewType[] _types;
@@ -235,10 +232,10 @@ namespace Microsoft.ML.Transforms
                     DataViewType valsItemType = typeVals.GetItemType();
                     DataViewType srcItemType = typeSrc.GetItemType();
                     Host.Check(typeVals.GetVectorSize() == srcItemType.GetKeyCountAsInt32(Host), "KeyValues metadata size does not match column type key count");
-                    if (!(typeSrc is VectorType vectorType))
+                    if (!(typeSrc is VectorDataViewType vectorType))
                         types[iinfo] = valsItemType;
                     else
-                        types[iinfo] = new VectorType((PrimitiveDataViewType)valsItemType, vectorType);
+                        types[iinfo] = new VectorDataViewType((PrimitiveDataViewType)valsItemType, vectorType.Dimensions);
 
                     // MarshalInvoke with two generic params.
                     Func<int, DataViewType, DataViewType, KeyToValueMap> func = GetKeyMetadata<int, int>;
@@ -263,7 +260,7 @@ namespace Microsoft.ML.Transforms
                 Host.Check(keyMetadata.Length == keyItemType.GetKeyCountAsInt32(Host));
 
                 VBufferUtils.Densify(ref keyMetadata);
-                return new KeyToValueMap<TKey, TValue>(this, (KeyType)keyItemType, (PrimitiveDataViewType)valItemType, keyMetadata, iinfo);
+                return new KeyToValueMap<TKey, TValue>(this, (KeyDataViewType)keyItemType, (PrimitiveDataViewType)valItemType, keyMetadata, iinfo);
             }
             /// <summary>
             /// A map is an object capable of creating the association from an input type, to an output
@@ -302,6 +299,8 @@ namespace Microsoft.ML.Transforms
                 public abstract Delegate GetMappingGetter(DataViewRow input);
 
                 public abstract JToken SavePfa(BoundPfaContext ctx, JToken srcToken);
+
+                public abstract bool SaveOnnx(OnnxContext ctx, string srcVariableName, string dstVariableName);
             }
 
             private class KeyToValueMap<TKey, TValue> : KeyToValueMap
@@ -314,7 +313,7 @@ namespace Microsoft.ML.Transforms
 
                 private readonly ValueMapper<TKey, UInt32> _convertToUInt;
 
-                public KeyToValueMap(Mapper parent, KeyType typeKey, PrimitiveDataViewType typeVal, VBuffer<TValue> values, int iinfo)
+                public KeyToValueMap(Mapper parent, KeyDataViewType typeKey, PrimitiveDataViewType typeVal, VBuffer<TValue> values, int iinfo)
                     : base(parent, typeVal, iinfo)
                 {
                     Parent.Host.Assert(values.IsDense);
@@ -324,16 +323,16 @@ namespace Microsoft.ML.Transforms
 
                     // REVIEW: May want to include more specific information about what the specific value is for the default.
                     DataViewType outputItemType = TypeOutput.GetItemType();
-                    _na = Data.Conversion.Conversions.Instance.GetNAOrDefault<TValue>(outputItemType, out _naMapsToDefault);
+                    _na = Data.Conversion.Conversions.DefaultInstance.GetNAOrDefault<TValue>(outputItemType, out _naMapsToDefault);
 
                     if (_naMapsToDefault)
                     {
                         // Only initialize _isDefault if _defaultIsNA is true as this is the only case in which it is used.
-                        _isDefault = Data.Conversion.Conversions.Instance.GetIsDefaultPredicate<TValue>(outputItemType);
+                        _isDefault = Data.Conversion.Conversions.DefaultInstance.GetIsDefaultPredicate<TValue>(outputItemType);
                     }
 
                     bool identity;
-                    _convertToUInt = Data.Conversion.Conversions.Instance.GetStandardConversion<TKey, UInt32>(typeKey, NumberDataViewType.UInt32, out identity);
+                    _convertToUInt = Data.Conversion.Conversions.DefaultInstance.GetStandardConversion<TKey, UInt32>(typeKey, NumberDataViewType.UInt32, out identity);
                 }
 
                 private void MapKey(in TKey src, ref TValue dst)
@@ -365,7 +364,7 @@ namespace Microsoft.ML.Transforms
 
                     Parent.Host.AssertValue(input);
                     var column = input.Schema[Parent.ColMapNewToOld[InfoIndex]];
-                    if (!(Parent._types[InfoIndex] is VectorType))
+                    if (!(Parent._types[InfoIndex] is VectorDataViewType))
                     {
                         var src = default(TKey);
                         ValueGetter<TKey> getSrc = input.GetGetter<TKey>(column);
@@ -487,7 +486,7 @@ namespace Microsoft.ML.Transforms
                     JObject cellRef = PfaUtils.Cell(cellName);
 
                     var srcType = Parent.InputSchema[Parent.ColMapNewToOld[InfoIndex]].Type;
-                    if (srcType is VectorType)
+                    if (srcType is VectorDataViewType)
                     {
                         var funcName = ctx.GetFreeFunctionName("mapKeyToValue");
                         ctx.Pfa.AddFunc(funcName, new JArray(PfaUtils.Param("key", PfaUtils.Type.Int)),
@@ -498,11 +497,124 @@ namespace Microsoft.ML.Transforms
                     }
                     return PfaUtils.If(PfaUtils.Call("<", srcToken, 0), defaultToken, PfaUtils.Index(cellRef, srcToken));
                 }
+
+                public override bool SaveOnnx(OnnxContext ctx, string srcVariableName, string dstVariableName)
+                {
+                    const int minimumOpSetVersion = 9;
+                    ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
+
+                    string opType;
+
+                    // Onnx expects the input keys to be int64s. But the input data can come from an ML.NET node that
+                    // may output a uint32. So cast it here to ensure that the data is treated correctly
+                    opType = "Cast";
+                    var srcShape = (int)ctx.RetrieveShapeOrNull(srcVariableName)[1];
+                    var castNodeOutput = ctx.AddIntermediateVariable(new VectorDataViewType(NumberDataViewType.Int64, srcShape), "CastNodeOutput");
+                    var castNode = ctx.CreateNode(opType, srcVariableName, castNodeOutput, ctx.GetNodeName(opType), "");
+                    var t = InternalDataKindExtensions.ToInternalDataKind(DataKind.Int64).ToType();
+                    castNode.AddAttribute("to", t);
+
+                    var labelEncoderOutput = dstVariableName;
+                    var labelEncoderInput = srcVariableName;
+                    if (TypeOutput == NumberDataViewType.Double || TypeOutput == BooleanDataViewType.Instance)
+                        labelEncoderOutput = ctx.AddIntermediateVariable(new VectorDataViewType(NumberDataViewType.Single, srcShape), "CastNodeOutput");
+                    else if (TypeOutput == NumberDataViewType.Int64 || TypeOutput == NumberDataViewType.UInt16 ||
+                        TypeOutput == NumberDataViewType.Int32 || TypeOutput == NumberDataViewType.Int16 ||
+                        TypeOutput == NumberDataViewType.UInt64 || TypeOutput == NumberDataViewType.UInt32)
+                        labelEncoderOutput = ctx.AddIntermediateVariable(new VectorDataViewType(TextDataViewType.Instance, srcShape), "CastNodeOutput");
+
+                    opType = "LabelEncoder";
+                    var node = ctx.CreateNode(opType, castNodeOutput, labelEncoderOutput, ctx.GetNodeName(opType));
+                    var keys = Array.ConvertAll<int, long>(Enumerable.Range(1, _values.Length).ToArray(), item => Convert.ToInt64(item));
+                    node.AddAttribute("keys_int64s", keys);
+
+                    if (TypeOutput == NumberDataViewType.Int64 || TypeOutput == NumberDataViewType.Int32 ||
+                        TypeOutput == NumberDataViewType.Int16 || TypeOutput == NumberDataViewType.UInt64 ||
+                        TypeOutput == NumberDataViewType.UInt32 || TypeOutput == NumberDataViewType.UInt16)
+                    {
+                        // LabelEncoder doesn't support mapping int64 -> int64, so values are converted to strings and later cast back to Int64s
+                        string[] values = Array.ConvertAll<TValue, string>(_values.GetValues().ToArray(), item => Convert.ToString(item));
+                        node.AddAttribute("values_strings", values);
+                        opType = "Cast";
+                        castNode = ctx.CreateNode(opType, labelEncoderOutput, dstVariableName, ctx.GetNodeName(opType), "");
+                        castNode.AddAttribute("to", TypeOutput.RawType);
+                    }
+                    else if (TypeOutput == NumberDataViewType.Single)
+                    {
+                        float[] values = Array.ConvertAll<TValue, float>(_values.GetValues().ToArray(), item => Convert.ToSingle(item));
+                        node.AddAttribute("values_floats", values);
+                    }
+                    else if (TypeOutput == NumberDataViewType.Double)
+                    {
+                        // LabelEncoder doesn't support double tensors, so values are converted to floats and later cast back to doubles
+                        float[] values = Array.ConvertAll<TValue, float>(_values.GetValues().ToArray(), item => Convert.ToSingle(item));
+                        node.AddAttribute("values_floats", values);
+                        opType = "Cast";
+                        castNode = ctx.CreateNode(opType, labelEncoderOutput, dstVariableName, ctx.GetNodeName(opType), "");
+                        t = InternalDataKindExtensions.ToInternalDataKind(DataKind.Double).ToType();
+                        castNode.AddAttribute("to", t);
+                    }
+                    else if (TypeOutput == TextDataViewType.Instance)
+                    {
+                        string[] values = Array.ConvertAll<TValue, string>(_values.GetValues().ToArray(), item => Convert.ToString(item));
+                        node.AddAttribute("values_strings", values);
+                    }
+                    else if (TypeOutput == BooleanDataViewType.Instance)
+                    {
+                        float[] values = Array.ConvertAll<TValue, float>(_values.GetValues().ToArray(), item => Convert.ToSingle(item));
+                        node.AddAttribute("values_floats", values);
+                        opType = "Cast";
+                        castNode = ctx.CreateNode(opType, labelEncoderOutput, dstVariableName, ctx.GetNodeName(opType), "");
+                        t = InternalDataKindExtensions.ToInternalDataKind(DataKind.Boolean).ToType();
+                        castNode.AddAttribute("to", t);
+                    }
+                    else
+                        return false;
+
+                    return true;
+                }
             }
 
+            public bool CanSaveOnnx(OnnxContext ctx) => true;
+
+            public void SaveAsOnnx(OnnxContext ctx)
+            {
+                for (int iinfo = 0; iinfo < _parent.ColumnPairs.Length; ++iinfo)
+                {
+                    var info = _parent.ColumnPairs[iinfo];
+                    var inputColumnName = info.inputColumnName;
+
+                    if (!ctx.ContainsColumn(inputColumnName))
+                        continue;
+
+                    string srcVariableName = ctx.GetVariableName(inputColumnName);
+                    var dstVariableName = ctx.AddIntermediateVariable(_types[iinfo], info.outputColumnName);
+                    if (!_kvMaps[iinfo].SaveOnnx(ctx, srcVariableName, dstVariableName))
+                        ctx.RemoveColumn(inputColumnName, true);
+                }
+            }
         }
     }
 
+    /// <summary>
+    /// Estimator for <see cref="KeyToValueMappingTransformer"/>. Converts the key types back to their original values.
+    /// </summary>
+    /// <remarks>
+    /// <format type="text/markdown"><![CDATA[
+    ///
+    /// ###  Estimator Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Does this estimator need to look at the data to train its parameters? | No |
+    /// | Input column data type | [key](xref:Microsoft.ML.Data.KeyDataViewType) type. |
+    /// | Output column data type | Type of the original data, prior to converting to [key](xref:Microsoft.ML.Data.KeyDataViewType) type. |
+    /// | Exportable to ONNX | Yes |
+    ///
+    /// Check the See Also section for links to usage examples.
+    /// ]]></format>
+    /// </remarks>
+    /// <seealso cref="ConversionsExtensionsCatalog.MapKeyToValue(TransformsCatalog.ConversionTransforms, InputOutputColumnPair[])"/>
+    /// <seealso cref="ConversionsExtensionsCatalog.MapKeyToValue(TransformsCatalog.ConversionTransforms, string, string)"/>
     public sealed class KeyToValueMappingEstimator : TrivialEstimator<KeyToValueMappingTransformer>
     {
         internal KeyToValueMappingEstimator(IHostEnvironment env, string outputColumnName, string inputColumnName = null)
@@ -534,7 +646,7 @@ namespace Microsoft.ML.Transforms
                     throw Host.ExceptParam(nameof(inputSchema), $"Input column '{colInfo.inputColumnName}' doesn't contain key values metadata");
 
                 SchemaShape metadata = null;
-                if (col.Annotations.TryFindColumn(AnnotationUtils.Kinds.SlotNames, out var slotCol))
+                if (col.HasSlotNames() && col.Annotations.TryFindColumn(AnnotationUtils.Kinds.SlotNames, out var slotCol))
                     metadata = new SchemaShape(new[] { slotCol });
 
                 result[colInfo.outputColumnName] = new SchemaShape.Column(colInfo.outputColumnName, col.Kind, keyMetaCol.ItemType, keyMetaCol.IsKey, metadata);

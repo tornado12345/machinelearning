@@ -4,7 +4,6 @@
 
 using System;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -131,7 +130,7 @@ namespace Microsoft.ML.Transforms
         {
         }
 
-        public LabelIndicatorTransform(IHostEnvironment env, Options options, IDataView input)
+        internal LabelIndicatorTransform(IHostEnvironment env, Options options, IDataView input)
             : base(env, LoadName, Contracts.CheckRef(options, nameof(options)).Columns,
                 input, TestIsMulticlassLabel)
         {

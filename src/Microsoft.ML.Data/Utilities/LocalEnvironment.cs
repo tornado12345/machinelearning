@@ -47,7 +47,7 @@ namespace Microsoft.ML.Data
         /// </summary>
         /// <param name="seed">Random seed. Set to <c>null</c> for a non-deterministic environment.</param>
         public LocalEnvironment(int? seed = null)
-            : base(RandomUtils.Create(seed), verbose: false)
+            : base(seed, verbose: false)
         {
         }
 
@@ -93,7 +93,7 @@ namespace Microsoft.ML.Data
             public Host(HostEnvironmentBase<LocalEnvironment> source, string shortName, string parentFullName, Random rand, bool verbose)
                 : base(source, shortName, parentFullName, rand, verbose)
             {
-                IsCancelled = source.IsCancelled;
+                IsCanceled = source.IsCanceled;
             }
 
             protected override IChannel CreateCommChannel(ChannelProviderBase parent, string name)

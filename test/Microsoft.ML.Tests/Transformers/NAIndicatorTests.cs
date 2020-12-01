@@ -9,7 +9,7 @@ using Microsoft.ML.Data.IO;
 using Microsoft.ML.Model;
 using Microsoft.ML.RunTests;
 using Microsoft.ML.Runtime;
-using Microsoft.ML.StaticPipe;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Tools;
 using Xunit;
 using Xunit.Abstractions;
@@ -44,7 +44,12 @@ namespace Microsoft.ML.Tests.Transformers
             };
 
             var dataView = ML.Data.LoadFromEnumerable(data);
-            var pipe = ML.Transforms.IndicateMissingValues(new ColumnOptions[] { ("NAA", "A"), ("NAB", "B"), ("NAC", "C"), ("NAD", "D") });
+            var pipe = ML.Transforms.IndicateMissingValues(new[] {
+                new InputOutputColumnPair("NAA", "A"),
+                new InputOutputColumnPair("NAB", "B"),
+                new InputOutputColumnPair("NAC", "C"),
+                new InputOutputColumnPair("NAD", "D")
+            });
             TestEstimatorCore(pipe, dataView);
             Done();
         }
@@ -67,7 +72,12 @@ namespace Microsoft.ML.Tests.Transformers
             };
 
             var dataView = ML.Data.LoadFromEnumerable(data);
-            var pipe = ML.Transforms.IndicateMissingValues(new ColumnOptions[] { ("NAA", "A"), ("NAB", "B"), ("NAC", "C"), ("NAD", "D") });
+            var pipe = ML.Transforms.IndicateMissingValues(new[] {
+                new InputOutputColumnPair("NAA", "A"),
+                new InputOutputColumnPair("NAB", "B"),
+                new InputOutputColumnPair("NAC", "C"),
+                new InputOutputColumnPair("NAD", "D")
+            });
             var result = pipe.Fit(dataView).Transform(dataView);
             var resultRoles = new RoleMappedData(result);
             using (var ms = new MemoryStream())
@@ -81,21 +91,22 @@ namespace Microsoft.ML.Tests.Transformers
         [Fact]
         public void NAIndicatorFileOutput()
         {
-            string dataPath = GetDataPath("breast-cancer.txt");
-            var reader = TextLoaderStatic.CreateLoader(ML, ctx => (
-                ScalarFloat: ctx.LoadFloat(1),
-                ScalarDouble: ctx.LoadDouble(1),
-                VectorFloat: ctx.LoadFloat(1, 4),
-                VectorDoulbe: ctx.LoadDouble(1, 4)
-            ));
+            string dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
+            var data = ML.Data.LoadFromTextFile(dataPath, new[] {
+                new TextLoader.Column("ScalarFloat", DataKind.Single, 1),
+                new TextLoader.Column("ScalarDouble", DataKind.Double, 1),
+                new TextLoader.Column("VectorFloat", DataKind.Single, 1, 4),
+                new TextLoader.Column("VectorDoulbe", DataKind.Double, 1, 4)
+            });
 
-            var data = reader.Load(new MultiFileSource(dataPath)).AsDynamic;
             var wrongCollection = new[] { new TestClass() { A = 1, B = 3, C = new float[2] { 1, 2 }, D = new double[2] { 3, 4 } } };
             var invalidData = ML.Data.LoadFromEnumerable(wrongCollection);
-            var est = ML.Transforms.IndicateMissingValues(new ColumnOptions[] 
+            var est = ML.Transforms.IndicateMissingValues(new[]
             {
-                ("A", "ScalarFloat"), ("B", "ScalarDouble"),
-                ("C", "VectorFloat"), ("D", "VectorDoulbe")
+                new InputOutputColumnPair("A", "ScalarFloat"),
+                new InputOutputColumnPair("B", "ScalarDouble"),
+                new InputOutputColumnPair("C", "VectorFloat"),
+                new InputOutputColumnPair("D", "VectorDoulbe")
             });
 
             TestEstimatorCore(est, data, invalidInput: invalidData);
@@ -125,7 +136,7 @@ namespace Microsoft.ML.Tests.Transformers
 
             var dataView = ML.Data.LoadFromEnumerable(data);
             var pipe = ML.Transforms.Categorical.OneHotEncoding("CatA", "A");
-            var newpipe = pipe.Append(ML.Transforms.IndicateMissingValues(("NAA", "CatA")));
+            var newpipe = pipe.Append(ML.Transforms.IndicateMissingValues("NAA", "CatA"));
             var result = newpipe.Fit(dataView).Transform(dataView);
             Assert.True(result.Schema.TryGetColumnIndex("NAA", out var col));
             // Check that the column is normalized.

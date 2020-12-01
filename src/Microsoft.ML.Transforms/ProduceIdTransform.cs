@@ -5,7 +5,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -220,7 +219,8 @@ namespace Microsoft.ML.Transforms
                 Ch.AssertValue(idGetter);
                 var fn = idGetter as ValueGetter<TValue>;
                 if (fn == null)
-                    throw Ch.Except("Invalid TValue in GetGetter: '{0}'", typeof(TValue));
+                    throw Ch.Except($"Invalid TValue in GetGetter: '{typeof(TValue)}', " +
+                            $"expected type: '{idGetter.GetType().GetGenericArguments().First()}'.");
                 return fn;
             }
         }

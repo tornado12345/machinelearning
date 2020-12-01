@@ -10,16 +10,18 @@ using Microsoft.ML.Transforms;
 namespace Microsoft.ML
 {
     /// <summary>
-    /// The trainer catalog extensions for the <see cref="OrdinaryLeastSquaresRegressionTrainer"/> and <see cref="SymbolicStochasticGradientDescentClassificationTrainer"/>.
+    /// Collection of extension methods for <see cref="RegressionCatalog.RegressionTrainers"/>,
+    /// <see cref="BinaryClassificationCatalog.BinaryClassificationTrainers"/>, and <see cref="TransformsCatalog"/>
+    /// to create MKL (Math Kernel Library) trainer and transform components.
     /// </summary>
     public static class MklComponentsCatalog
     {
         /// <summary>
-        /// Predict a target using a linear regression model trained with the <see cref="OrdinaryLeastSquaresRegressionTrainer"/>.
+        /// Create <see cref="OlsTrainer"/>, which predicts a target using a linear regression model.
         /// </summary>
         /// <param name="catalog">The <see cref="RegressionCatalog"/>.</param>
-        /// <param name="labelColumnName">The name of the label column.</param>
-        /// <param name="featureColumnName">The name of the feature column.</param>
+        /// <param name="labelColumnName">The name of the label column. The column data must be <see cref="System.Single"/>.</param>
+        /// <param name="featureColumnName">The name of the feature column. The column data must be a known-sized vector of <see cref="System.Single"/>.</param>
         /// <param name="exampleWeightColumnName">The name of the example weight column (optional).</param>
         /// <example>
         /// <format type="text/markdown">
@@ -28,28 +30,28 @@ namespace Microsoft.ML
         /// ]]>
         /// </format>
         /// </example>
-        public static OrdinaryLeastSquaresRegressionTrainer OrdinaryLeastSquares(this RegressionCatalog.RegressionTrainers catalog,
+        public static OlsTrainer Ols(this RegressionCatalog.RegressionTrainers catalog,
             string labelColumnName = DefaultColumnNames.Label,
             string featureColumnName = DefaultColumnNames.Features,
             string exampleWeightColumnName = null)
         {
             Contracts.CheckValue(catalog, nameof(catalog));
             var env = CatalogUtils.GetEnvironment(catalog);
-            var options = new OrdinaryLeastSquaresRegressionTrainer.Options
+            var options = new OlsTrainer.Options
             {
                 LabelColumnName = labelColumnName,
                 FeatureColumnName = featureColumnName,
                 ExampleWeightColumnName = exampleWeightColumnName
             };
 
-            return new OrdinaryLeastSquaresRegressionTrainer(env, options);
+            return new OlsTrainer(env, options);
         }
 
         /// <summary>
-        /// Predict a target using a linear regression model trained with the <see cref="OrdinaryLeastSquaresRegressionTrainer"/>.
+        /// Create <see cref="OlsTrainer"/> with advanced options, which predicts a target using a linear regression model.
         /// </summary>
         /// <param name="catalog">The <see cref="RegressionCatalog"/>.</param>
-        /// <param name="options">Algorithm advanced options. See <see cref="OrdinaryLeastSquaresRegressionTrainer.Options"/>.</param>
+        /// <param name="options">Algorithm advanced options. See <see cref="OlsTrainer.Options"/>.</param>
         /// <example>
         /// <format type="text/markdown">
         /// <![CDATA[
@@ -57,68 +59,72 @@ namespace Microsoft.ML
         /// ]]>
         /// </format>
         /// </example>
-        public static OrdinaryLeastSquaresRegressionTrainer OrdinaryLeastSquares(
+        public static OlsTrainer Ols(
             this RegressionCatalog.RegressionTrainers catalog,
-            OrdinaryLeastSquaresRegressionTrainer.Options options)
+            OlsTrainer.Options options)
         {
             Contracts.CheckValue(catalog, nameof(catalog));
             Contracts.CheckValue(options, nameof(options));
 
             var env = CatalogUtils.GetEnvironment(catalog);
-            return new OrdinaryLeastSquaresRegressionTrainer(env, options);
+            return new OlsTrainer(env, options);
         }
 
         /// <summary>
-        ///  Predict a target using a linear binary classification model trained with the <see cref="SymbolicStochasticGradientDescentClassificationTrainer"/>.
+        /// Create <see cref="SymbolicSgdLogisticRegressionBinaryTrainer"/>, which predicts a target using a linear binary classification model trained over boolean label data.
+        /// Stochastic gradient descent (SGD) is an iterative algorithm that optimizes a differentiable objective function.
+        /// The <see cref="SymbolicSgdLogisticRegressionBinaryTrainer"/> parallelizes SGD using <a href="https://www.microsoft.com/en-us/research/project/project-parade/#!symbolic-execution">symbolic execution</a>.
         /// </summary>
         /// <param name="catalog">The <see cref="BinaryClassificationCatalog"/>.</param>
-        /// <param name="labelColumnName">The name of the label column.</param>
-        /// <param name="featureColumnName">The name of the feature column.</param>
+        /// <param name="labelColumnName">The name of the label column. The column data must be <see cref="System.Boolean"/>.</param>
+        /// <param name="featureColumnName">The name of the feature column. The column data must be a known-sized vector of <see cref="System.Single"/>.</param>
         /// <param name="numberOfIterations">Number of training iterations.</param>
         /// <example>
         /// <format type="text/markdown">
         /// <![CDATA[
-        /// [!code-csharp[SymbolicStochasticGradientDescent](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Trainers/BinaryClassification/SymbolicStochasticGradientDescent.cs)]
+        /// [!code-csharp[SymbolicSgdLogisticRegression](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Trainers/BinaryClassification/SymbolicSgdLogisticRegression.cs)]
         /// ]]>
         /// </format>
         /// </example>
-        public static SymbolicStochasticGradientDescentClassificationTrainer SymbolicStochasticGradientDescent(this BinaryClassificationCatalog.BinaryClassificationTrainers catalog,
+        public static SymbolicSgdLogisticRegressionBinaryTrainer SymbolicSgdLogisticRegression(this BinaryClassificationCatalog.BinaryClassificationTrainers catalog,
             string labelColumnName = DefaultColumnNames.Label,
             string featureColumnName = DefaultColumnNames.Features,
-            int numberOfIterations = SymbolicStochasticGradientDescentClassificationTrainer.Defaults.NumberOfIterations)
+            int numberOfIterations = SymbolicSgdLogisticRegressionBinaryTrainer.Defaults.NumberOfIterations)
         {
             Contracts.CheckValue(catalog, nameof(catalog));
             var env = CatalogUtils.GetEnvironment(catalog);
 
-            var options = new SymbolicStochasticGradientDescentClassificationTrainer.Options
+            var options = new SymbolicSgdLogisticRegressionBinaryTrainer.Options
             {
                 LabelColumnName = labelColumnName,
                 FeatureColumnName = featureColumnName,
             };
 
-            return new SymbolicStochasticGradientDescentClassificationTrainer(env, options);
+            return new SymbolicSgdLogisticRegressionBinaryTrainer(env, options);
         }
 
         /// <summary>
-        ///  Predict a target using a linear binary classification model trained with the <see cref="SymbolicStochasticGradientDescentClassificationTrainer"/>.
+        /// Create <see cref= "SymbolicSgdLogisticRegressionBinaryTrainer" /> with advanced options, which predicts a target using a linear binary classification model trained over boolean label data.
+        /// Stochastic gradient descent (SGD) is an iterative algorithm that optimizes a differentiable objective function.
+        /// The <see cref="SymbolicSgdLogisticRegressionBinaryTrainer"/> parallelizes SGD using <a href="https://www.microsoft.com/en-us/research/project/project-parade/#!symbolic-execution">symbolic execution</a>.
         /// </summary>
         /// <param name="catalog">The <see cref="BinaryClassificationCatalog"/>.</param>
-        /// <param name="options">Algorithm advanced options. See <see cref="SymbolicStochasticGradientDescentClassificationTrainer.Options"/>.</param>
+        /// <param name="options">Algorithm advanced options. See <see cref="SymbolicSgdLogisticRegressionBinaryTrainer.Options"/>.</param>
         /// <example>
         /// <format type="text/markdown">
         /// <![CDATA[
-        /// [!code-csharp[SymbolicStochasticGradientDescent](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Trainers/BinaryClassification/SymbolicStochasticGradientDescentWithOptions.cs)]
+        /// [!code-csharp[SymbolicSgdLogisticRegression](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Trainers/BinaryClassification/SymbolicSgdLogisticRegressionWithOptions.cs)]
         /// ]]>
         /// </format>
         /// </example>
-        public static SymbolicStochasticGradientDescentClassificationTrainer SymbolicStochasticGradientDescent(
+        public static SymbolicSgdLogisticRegressionBinaryTrainer SymbolicSgdLogisticRegression(
             this BinaryClassificationCatalog.BinaryClassificationTrainers catalog,
-            SymbolicStochasticGradientDescentClassificationTrainer.Options options)
+            SymbolicSgdLogisticRegressionBinaryTrainer.Options options)
         {
             Contracts.CheckValue(catalog, nameof(catalog));
             Contracts.CheckValue(options, nameof(options));
             var env = CatalogUtils.GetEnvironment(catalog);
-            return new SymbolicStochasticGradientDescentClassificationTrainer(env, options);
+            return new SymbolicSgdLogisticRegressionBinaryTrainer(env, options);
         }
 
         /// <summary>
@@ -136,6 +142,7 @@ namespace Microsoft.ML
         /// <format type="text/markdown">
         /// <![CDATA[
         /// [!code-csharp[VectorWhiten](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Transforms/Projection/VectorWhiten.cs)]
+        /// [!code-csharp[VectorWhiten](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Transforms/Projection/VectorWhitenWithOptions.cs)]
         /// ]]>
         /// </format>
         /// </example>
@@ -155,12 +162,12 @@ namespace Microsoft.ML
         /// <example>
         /// <format type="text/markdown">
         /// <![CDATA[
-        /// [!code-csharp[VectorWhiten](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Transforms/Projection/VectorWhitenWithColumnOptions.cs)]
+        /// [!code-csharp[VectorWhiten](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Transforms/Projection/VectorWhitenWithOptions.cs)]
         /// ]]>
         /// </format>
         /// </example>
-        public static VectorWhiteningEstimator VectorWhiten(this TransformsCatalog catalog, params VectorWhiteningEstimator.ColumnOptions[] columns)
+        [BestFriend]
+        internal static VectorWhiteningEstimator VectorWhiten(this TransformsCatalog catalog, params VectorWhiteningEstimator.ColumnOptions[] columns)
             => new VectorWhiteningEstimator(CatalogUtils.GetEnvironment(catalog), columns);
-
     }
 }

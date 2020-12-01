@@ -5,7 +5,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
@@ -23,7 +22,7 @@ namespace Microsoft.ML.Trainers
     /// <example>
     /// <format type="text/markdown">
     /// <![CDATA[
-    ///  [!code-csharp[KMeans](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/KMeans.cs)]
+    ///  [!code-csharp[KMeans](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Trainers/Clustering/KMeans.cs)]
     /// ]]></format>
     /// </example>
     public sealed class KMeansModelParameters :
@@ -99,8 +98,8 @@ namespace Microsoft.ML.Trainers
 
             InitPredictor();
 
-            _inputType = new VectorType(NumberDataViewType.Single, _dimensionality);
-            _outputType = new VectorType(NumberDataViewType.Single, _k);
+            _inputType = new VectorDataViewType(NumberDataViewType.Single, _dimensionality);
+            _outputType = new VectorDataViewType(NumberDataViewType.Single, _k);
         }
 
         /// <summary>
@@ -141,8 +140,8 @@ namespace Microsoft.ML.Trainers
 
             InitPredictor();
 
-            _inputType = new VectorType(NumberDataViewType.Single, _dimensionality);
-            _outputType = new VectorType(NumberDataViewType.Single, _k);
+            _inputType = new VectorDataViewType(NumberDataViewType.Single, _dimensionality);
+            _outputType = new VectorDataViewType(NumberDataViewType.Single, _k);
         }
 
         ValueMapper<TIn, TOut> IValueMapper.GetMapper<TIn, TOut>()
@@ -254,7 +253,7 @@ namespace Microsoft.ML.Trainers
         /// <summary>
         /// This method is called by reflection to instantiate a predictor.
         /// </summary>
-        private static KMeansModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
+        internal static KMeansModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
         {
             Contracts.CheckValue(env, nameof(env));
             env.CheckValue(ctx, nameof(ctx));
@@ -289,7 +288,7 @@ namespace Microsoft.ML.Trainers
 
         bool ISingleCanSaveOnnx.SaveAsOnnx(OnnxContext ctx, string[] outputNames, string featureColumn)
         {
-            // Computation graph of distances to all centriods for a batch of examples. Note that a centriod is just
+            // Computation graph of distances to all centroids for a batch of examples. Note that a centroid is just
             // the center of a cluster. We use [] to denote the dimension of a variable; for example, X [3, 2] means
             // that X is a 3-by-2 tensor. In addition, for a matrix X, X^T denotes its transpose.
             //
@@ -297,11 +296,11 @@ namespace Microsoft.ML.Trainers
             // l: # of examples.
             // n: # of features per input example.
             // X: input examples, l-by-n tensor.
-            // C: centriods, k-by-n tensor.
-            // C^2: 2-norm of all centriod vectors, its shape is [k].
-            // Y: 2-norm of difference between examples and centriods, l-by-k tensor. The value at i-th row and k-th
-            // column row, Y[i,k], is the distance from example i to centrioid k.
-            // L: the id of the nearest centriod for each input example, its shape is [l].
+            // C: centroids, k-by-n tensor.
+            // C^2: 2-norm of all centroid vectors, its shape is [k].
+            // Y: 2-norm of difference between examples and centroids, l-by-k tensor. The value at i-th row and k-th
+            // column row, Y[i,k], is the distance from example i to centroid k.
+            // L: the id of the nearest centroid for each input example, its shape is [l].
             //
             // .------------------------------------------------------.
             // |                                                      |
@@ -316,6 +315,9 @@ namespace Microsoft.ML.Trainers
             //                                                                   |
             //                                                                   v
             //                                           L [l] <--- ArgMin <---  Y [l, k]
+
+            const int minimumOpSetVersion = 9;
+            ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
 
             // Allocate C, which is a constant tensor in prediction phase
             var shapeC = new long[] { _centroids.Length, _centroids[0].Length };
@@ -332,19 +334,21 @@ namespace Microsoft.ML.Trainers
             var nameX = featureColumn;
 
             // Compute X^2 from X
-            var nameX2 = ctx.AddIntermediateVariable(null, "X2", true);
+            var nameX2 = ctx.AddIntermediateVariable(new VectorDataViewType(NumberDataViewType.Single, 1), "X2");
             var reduceNodeX2 = ctx.CreateNode("ReduceSumSquare", nameX, nameX2, ctx.GetNodeName("ReduceSumSquare"), "");
+            reduceNodeX2.AddAttribute("axes", new long[] { 1 });
 
             // Compute -2XC^T. Note that Gemm always takes three inputs. Since we only have two here,
             // a dummy one, named zero, is created.
+            var dataViewType = new VectorDataViewType(NumberDataViewType.Single, _centroids.Length);
             var zeroName = ctx.AddInitializer(new float[] { 0f }, null, "zero");
-            var nameXC2 = ctx.AddIntermediateVariable(null, "XC2", true);
+            var nameXC2 = ctx.AddIntermediateVariable(dataViewType, "XC2");
             var gemmNodeXC2 = ctx.CreateNode("Gemm", new[] { nameX, nameC, zeroName }, new[] { nameXC2 }, ctx.GetNodeName("Gemm"), "");
             gemmNodeXC2.AddAttribute("alpha", -2f);
             gemmNodeXC2.AddAttribute("transB", 1);
 
             // Compute Z = X^2 - 2XC^T
-            var nameZ = ctx.AddIntermediateVariable(null, "Z", true);
+            var nameZ = ctx.AddIntermediateVariable(dataViewType, "Z");
             var addNodeZ = ctx.CreateNode("Add", new[] { nameX2, nameXC2 }, new[] { nameZ }, ctx.GetNodeName("Add"), "");
 
             // Compute Y = Z + C^2
@@ -352,10 +356,16 @@ namespace Microsoft.ML.Trainers
             var addNodeY = ctx.CreateNode("Add", new[] { nameZ, nameC2 }, new[] { nameY }, ctx.GetNodeName("Add"), "");
 
             // Compute the most-matched cluster index, L
-            var nameL = outputNames[0];
+            var nameL = "ArgMinInt64";
             var predictNodeL = ctx.CreateNode("ArgMin", nameY, nameL, ctx.GetNodeName("ArgMin"), "");
             predictNodeL.AddAttribute("axis", 1);
             predictNodeL.AddAttribute("keepdims", 1);
+
+            // ArgMin outputs an Int64. But ML.NET's KMeans trainer outputs a UINT32.
+            // Cast the output here to UInt32 to make them compatible
+            var predictedNode = ctx.CreateNode("Cast", nameL, outputNames[0], ctx.GetNodeName("Cast"), "");
+            var t = InternalDataKindExtensions.ToInternalDataKind(DataKind.UInt32).ToType();
+            predictedNode.AddAttribute("to", t);
 
             return true;
         }

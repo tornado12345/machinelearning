@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -15,12 +14,13 @@ using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Model;
 using Microsoft.ML.Numeric;
 using Microsoft.ML.Runtime;
+using Microsoft.ML.Trainers;
 
 [assembly: LoadableClass(typeof(IDataScorerTransform), typeof(FeatureContributionScorer), typeof(FeatureContributionScorer.Arguments),
-    typeof(SignatureDataScorer), "Feature Contribution Scorer", "fcc", "wtf", "fct", "FeatureContributionCalculationScorer", AnnotationUtils.Const.ScoreColumnKind.FeatureContribution)]
+    typeof(SignatureDataScorer), "Feature Contribution Scorer", "fcc", "fct", "FeatureContributionCalculationScorer", AnnotationUtils.Const.ScoreColumnKind.FeatureContribution)]
 
 [assembly: LoadableClass(typeof(ISchemaBindableMapper), typeof(FeatureContributionScorer), typeof(FeatureContributionScorer.Arguments),
-    typeof(SignatureBindableMapper), "Feature Contribution Mapper", "fcc", "wtf", "fct", AnnotationUtils.Const.ScoreColumnKind.FeatureContribution)]
+    typeof(SignatureBindableMapper), "Feature Contribution Mapper", "fcc", "fct", AnnotationUtils.Const.ScoreColumnKind.FeatureContribution)]
 
 [assembly: LoadableClass(typeof(ISchemaBindableMapper), typeof(FeatureContributionScorer), null, typeof(SignatureLoadModel),
     "Feature Contribution Mapper", FeatureContributionScorer.MapperLoaderSignature)]
@@ -33,7 +33,7 @@ namespace Microsoft.ML.Data
     internal sealed class FeatureContributionScorer
     {
         // Apparently, loader signature is limited in length to 24 characters.
-        internal const string MapperLoaderSignature = "WTFBindable";
+        internal const string MapperLoaderSignature = "FCCBindable";
 
         internal sealed class Arguments : ScorerArgumentsBase
         {
@@ -91,6 +91,9 @@ namespace Microsoft.ML.Data
         /// </summary>
         private sealed class BindableMapper : ISchemaBindableMapper, ICanSaveModel, IPredictor
         {
+            private static readonly FuncInstanceMethodInfo1<BindableMapper, DataViewRow, int, Delegate> _getValueGetterMethodInfo
+                = FuncInstanceMethodInfo1<BindableMapper, DataViewRow, int, Delegate>.Create(target => target.GetValueGetter<int>);
+
             private readonly int _topContributionsCount;
             private readonly int _bottomContributionsCount;
             private readonly bool _normalize;
@@ -103,7 +106,7 @@ namespace Microsoft.ML.Data
             private static VersionInfo GetVersionInfo()
             {
                 return new VersionInfo(
-                    modelSignature: "WTF SCBI",
+                    modelSignature: "FCC SCBI",
                     verWrittenCur: 0x00010001, // Initial
                     verReadableCur: 0x00010001,
                     verWeCanReadBack: 0x00010001,
@@ -202,12 +205,10 @@ namespace Microsoft.ML.Data
                 Contracts.Check(0 <= colSrc && colSrc < input.Schema.Count);
 
                 var typeSrc = input.Schema[colSrc].Type;
-                Func<DataViewRow, int, ValueGetter<VBuffer<float>>> del = GetValueGetter<int>;
 
                 // REVIEW: Assuming Feature contributions will be VBuffer<float>.
                 // For multiclass LR it needs to be(VBuffer<float>[].
-                var meth = del.GetMethodInfo().GetGenericMethodDefinition().MakeGenericMethod(typeSrc.RawType);
-                return (Delegate)meth.Invoke(this, new object[] { input, colSrc });
+                return Utils.MarshalInvoke(_getValueGetterMethodInfo, this, typeSrc.RawType, input, colSrc);
             }
 
             private ReadOnlyMemory<char> GetSlotName(int index, VBuffer<ReadOnlyMemory<char>> slotNames)
@@ -340,7 +341,7 @@ namespace Microsoft.ML.Data
                             FeatureColumn.Annotations.GetValue(AnnotationUtils.Kinds.SlotNames, ref value));
 
                     var schemaBuilder = new DataViewSchema.Builder();
-                    var featureContributionType = new VectorType(NumberDataViewType.Single, FeatureColumn.Type as VectorType);
+                    var featureContributionType = new VectorDataViewType(NumberDataViewType.Single, ((VectorDataViewType)FeatureColumn.Type).Dimensions);
                     schemaBuilder.AddColumn(DefaultColumnNames.FeatureContributions, featureContributionType, metadataBuilder.ToAnnotations());
                     _outputSchema = schemaBuilder.ToSchema();
                 }

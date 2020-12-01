@@ -3,19 +3,25 @@
 // See the LICENSE file in the project root for more information.
 
 using System;
+using Microsoft.ML.TestFramework;
 using Microsoft.ML.Trainers;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Microsoft.ML.RunTests
 {
     /// <summary>
     /// These are tests of the loss functions in the Learners assembly.
     /// </summary>
-    public class TestLoss
+    public class TestLoss : BaseTestClass
     {
         private const string _category = "Loss";
 
         private const float _epsilon = 1e-4f;
+
+        public TestLoss(ITestOutputHelper output) : base(output)
+        {
+        }
 
         /// <summary>
         /// A small helper for comparing a loss's computations to expected values.
@@ -29,7 +35,7 @@ namespace Microsoft.ML.RunTests
         /// step, given <c>label</c> and <c>output</c></param>
         /// <param name="differentiable">Whether the loss function is differentiable
         /// w.r.t. the output in the vicinity of the output value</param>
-        private void TestHelper(IScalarOutputLoss lossFunc, double label, double output, double expectedLoss, double expectedUpdate, bool differentiable = true)
+        private void TestHelper(IScalarLoss lossFunc, double label, double output, double expectedLoss, double expectedUpdate, bool differentiable = true)
         {
             Double loss = lossFunc.Loss((float)output, (float)label);
             float derivative = lossFunc.Derivative((float)output, (float)label);

@@ -9,7 +9,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Command;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
@@ -17,6 +16,7 @@ using Microsoft.ML.Model;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.TestFramework;
 using Microsoft.ML.TestFramework.Attributes;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Tools;
 using Xunit;
 using Xunit.Abstractions;
@@ -67,16 +67,16 @@ namespace Microsoft.ML.RunTests
                 Path = _testCmd.DeleteOutputPath(_dir, _name);
             }
 
-            public bool CheckEquality(int digitsOfPrecision = DigitsOfPrecision)
+            public bool CheckEquality(int digitsOfPrecision = DigitsOfPrecision, NumberParseOption parseOption = NumberParseOption.Default)
             {
                 Contracts.Assert(CanBeBaselined);
-                return _testCmd.CheckEquality(_dir, _name, digitsOfPrecision: digitsOfPrecision);
+                return _testCmd.CheckEquality(_dir, _name, digitsOfPrecision: digitsOfPrecision, parseOption: parseOption);
             }
 
-            public bool CheckEqualityNormalized(int digitsOfPrecision = DigitsOfPrecision)
+            public bool CheckEqualityNormalized(int digitsOfPrecision = DigitsOfPrecision, NumberParseOption parseOption = NumberParseOption.Default)
             {
                 Contracts.Assert(CanBeBaselined);
-                return _testCmd.CheckEqualityNormalized(_dir, _name, digitsOfPrecision: digitsOfPrecision);
+                return _testCmd.CheckEqualityNormalized(_dir, _name, digitsOfPrecision: digitsOfPrecision, parseOption: parseOption);
             }
 
             public string ArgStr(string name)
@@ -213,11 +213,11 @@ namespace Microsoft.ML.RunTests
                 _names = names;
             }
 
-            public bool CheckEquality(int digitsOfPrecision = DigitsOfPrecision)
+            public bool CheckEquality(int digitsOfPrecision = DigitsOfPrecision, NumberParseOption parseOption = NumberParseOption.Default)
             {
                 if (Normalized)
-                    return Path.CheckEqualityNormalized(digitsOfPrecision);
-                return Path.CheckEquality(digitsOfPrecision);
+                    return Path.CheckEqualityNormalized(digitsOfPrecision, parseOption);
+                return Path.CheckEquality(digitsOfPrecision, parseOption);
             }
         }
 
@@ -281,7 +281,7 @@ namespace Microsoft.ML.RunTests
 
         protected bool TestCore(RunContextBase ctx, string cmdName, string args, params PathArgument[] toCompare)
         {
-            return TestCore(ctx, cmdName, args, DigitsOfPrecision, toCompare);
+            return TestCore(ctx, cmdName, args, DigitsOfPrecision, NumberParseOption.Default, toCompare);
         }
 
         /// <summary>
@@ -289,7 +289,7 @@ namespace Microsoft.ML.RunTests
         /// <paramref name="toCompare"/> objects are used for comparison only.
         /// </summary>
         /// <returns>Whether this test succeeded.</returns>
-        protected bool TestCore(RunContextBase ctx, string cmdName, string args, int digitsOfPrecision, params PathArgument[] toCompare)
+        protected bool TestCore(RunContextBase ctx, string cmdName, string args, int digitsOfPrecision, NumberParseOption parseOption, params PathArgument[] toCompare)
         {
             Contracts.AssertValue(cmdName);
             Contracts.AssertValueOrNull(args);
@@ -306,10 +306,10 @@ namespace Microsoft.ML.RunTests
             bool all = true;
             if (!ctx.NoComparisons)
             {
-                all &= outputPath.CheckEqualityNormalized(digitsOfPrecision);
+                all &= outputPath.CheckEqualityNormalized(digitsOfPrecision, parseOption);
                 if (toCompare != null)
                     foreach (var c in toCompare)
-                        all &= c.CheckEquality(digitsOfPrecision);
+                        all &= c.CheckEquality(digitsOfPrecision, parseOption);
             }
             return all;
         }
@@ -364,11 +364,12 @@ namespace Microsoft.ML.RunTests
         private bool TestCoreCore(RunContextBase ctx, string cmdName, string dataPath, PathArgument.Usage situation,
             OutputPath inModelPath, OutputPath outModelPath, string loaderArgs, string extraArgs, params PathArgument[] toCompare)
         {
-            return TestCoreCore(ctx, cmdName, dataPath, situation, inModelPath, outModelPath, loaderArgs, extraArgs, DigitsOfPrecision, toCompare);
+            return TestCoreCore(ctx, cmdName, dataPath, situation, inModelPath, outModelPath, loaderArgs, extraArgs, DigitsOfPrecision, NumberParseOption.Default, toCompare);
         }
 
         private bool TestCoreCore(RunContextBase ctx, string cmdName, string dataPath, PathArgument.Usage situation,
-            OutputPath inModelPath, OutputPath outModelPath, string loaderArgs, string extraArgs, int digitsOfPrecision, params PathArgument[] toCompare)
+            OutputPath inModelPath, OutputPath outModelPath, string loaderArgs, string extraArgs, int digitsOfPrecision,
+            NumberParseOption parseOption, params PathArgument[] toCompare)
         {
             Contracts.AssertNonEmpty(cmdName);
             Contracts.AssertValueOrNull(dataPath);
@@ -398,7 +399,7 @@ namespace Microsoft.ML.RunTests
                 args.Add(extraArgs);
             var argString = string.Join(" ", args);
             var paths = toCompare.Where(pa => (pa.CmpUsage & situation) != PathArgument.Usage.None).ToArray();
-            return TestCore(ctx, cmdName, argString, digitsOfPrecision: digitsOfPrecision, toCompare: paths);
+            return TestCore(ctx, cmdName, argString, digitsOfPrecision: digitsOfPrecision, parseOption: parseOption, toCompare: paths);
         }
 
         /// <summary>
@@ -420,9 +421,9 @@ namespace Microsoft.ML.RunTests
             return TestCoreCore(ctx, cmdName, dataPath, PathArgument.Usage.DataModel, null, ctx.ModelPath(), loaderArgs, extraArgs, toCompare);
         }
 
-        protected bool TestCore(RunContextBase ctx, string cmdName, string dataPath, string loaderArgs, string extraArgs, int digitsOfPrecision, params PathArgument[] toCompare)
+        protected bool TestCore(RunContextBase ctx, string cmdName, string dataPath, string loaderArgs, string extraArgs, int digitsOfPrecision, NumberParseOption parseOption, params PathArgument[] toCompare)
         {
-            return TestCoreCore(ctx, cmdName, dataPath, PathArgument.Usage.DataModel, null, ctx.ModelPath(), loaderArgs, extraArgs, digitsOfPrecision, toCompare);
+            return TestCoreCore(ctx, cmdName, dataPath, PathArgument.Usage.DataModel, null, ctx.ModelPath(), loaderArgs, extraArgs, digitsOfPrecision, parseOption, toCompare);
         }
 
         /// <summary>
@@ -442,9 +443,9 @@ namespace Microsoft.ML.RunTests
             return TestCoreCore(ctx, cmdName, dataPath, PathArgument.Usage.Loader, modelPath, null, null, extraArgs, toCompare);
         }
 
-        protected bool TestInCore(RunContextBase ctx, string cmdName, string dataPath, OutputPath modelPath, string extraArgs, int digitsOfPrecision = DigitsOfPrecision, params PathArgument[] toCompare)
+        protected bool TestInCore(RunContextBase ctx, string cmdName, string dataPath, OutputPath modelPath, string extraArgs, int digitsOfPrecision = DigitsOfPrecision, NumberParseOption parseOption = NumberParseOption.Default, params PathArgument[] toCompare)
         {
-            return TestCoreCore(ctx, cmdName, dataPath, PathArgument.Usage.Loader, modelPath, null, null, extraArgs, digitsOfPrecision, toCompare);
+            return TestCoreCore(ctx, cmdName, dataPath, PathArgument.Usage.Loader, modelPath, null, null, extraArgs, digitsOfPrecision, parseOption, toCompare);
         }
 
         /// <summary>
@@ -633,12 +634,12 @@ namespace Microsoft.ML.RunTests
 
         protected bool TestCore(string cmdName, string dataPath, string loaderArgs, string extraArgs, params PathArgument[] toCompare)
         {
-            return TestCore(Params, cmdName, dataPath, loaderArgs, extraArgs, DigitsOfPrecision, toCompare);
+            return TestCore(Params, cmdName, dataPath, loaderArgs, extraArgs, DigitsOfPrecision, NumberParseOption.Default, toCompare);
         }
 
         protected bool TestCore(string cmdName, string dataPath, string loaderArgs, string extraArgs, int digitsOfPrecision, params PathArgument[] toCompare)
         {
-            return TestCore(Params, cmdName, dataPath, loaderArgs, extraArgs, digitsOfPrecision, toCompare);
+            return TestCore(Params, cmdName, dataPath, loaderArgs, extraArgs, digitsOfPrecision, NumberParseOption.Default, toCompare);
         }
 
         protected bool TestCore(string cmdName, string args, params PathArgument[] toCompare)
@@ -659,7 +660,7 @@ namespace Microsoft.ML.RunTests
 
         protected bool TestInCore(string cmdName, string dataPath, OutputPath modelPath, string extraArgs, int digitsOfPrecision = DigitsOfPrecision, params PathArgument[] toCompare)
         {
-            return TestInCore(Params, cmdName, dataPath, modelPath, extraArgs, digitsOfPrecision, toCompare);
+            return TestInCore(Params, cmdName, dataPath, modelPath, extraArgs, digitsOfPrecision, NumberParseOption.Default, toCompare);
         }
 
         protected bool TestInOutCore(string cmdName, string dataPath, OutputPath modelPath, string extraArgs, params PathArgument[] toCompare)
@@ -674,6 +675,23 @@ namespace Microsoft.ML.RunTests
     {
         // REVIEW: Migrate existing tests where the train/score/evaluate runs
         // are explicit in favor of the more generic tests where appropriate.
+
+        [TestCategory(Cat)]
+        [Fact]
+        public void EvaluateRankingWithMaml()
+        {
+            RunMTAThread(() =>
+            {
+                string trainData = GetDataPath("adult.tiny.with-schema.txt");
+                string extraArgs = $"tr=FastRankRanking{{t=1}} eval=RankingEvaluator{{t=10}} prexf=rangefilter{{col=Label min=20 max=25}} " +
+                $"prexf=term{{col=Strat:Label}} xf=term{{col=Label}} xf=hash{{col=GroupId}} threads- norm=Warn";
+
+                string loaderArgs = "loader=text{col=Features:R4:10-14 col=Label:R4:9 col=GroupId:TX:1 header+}";
+
+                TestCore("cv", trainData, loaderArgs, extraArgs);
+            });
+            Done();
+        }
 
         [TestCategory(Cat)]
         [Fact(Skip = "Need CoreTLC specific baseline update")]
@@ -818,7 +836,7 @@ namespace Microsoft.ML.RunTests
 
         [TestCategory(Cat)]
         [Fact(Skip = "Need CoreTLC specific baseline update")]
-        public void SaveMultiClassLrPredictorAsSummary()
+        public void SaveMulticlassLrPredictorAsSummary()
         {
             // First run a training.
             string pathData = GetDataPath("iris.txt");
@@ -850,7 +868,7 @@ namespace Microsoft.ML.RunTests
             Done();
         }
 
-        [X64Fact("x86 output differs from Baseline")]
+        [Fact]
         public void CommandCrossValidationKeyLabelWithFloatKeyValues()
         {
             RunMTAThread(() =>
@@ -862,6 +880,16 @@ namespace Microsoft.ML.RunTests
                 string loaderArgs = "loader=text{col=Features:R4:10-14 col=Label:R4:9 col=GroupId:TX:1 header+}";
                 TestCore("cv", pathData, loaderArgs, extraArgs);
             });
+            Done();
+        }
+
+        [Fact]
+        public void CommandCrossValidationWithTextStratificationColumn()
+        {
+            string pathData = GetDataPath(@"adult.tiny.with-schema.txt");
+            string extraArgs = $"tr=lr{{{TestLearnersBase.logisticRegression.Trainer.SubComponentSettings}}} strat=Strat threads- norm=Warn";
+            string loaderArgs = "loader=text{col=Features:R4:9-14 col=Label:R4:0 col=Strat:TX:1 header+}";
+            TestCore("cv", pathData, loaderArgs, extraArgs, 5);
             Done();
         }
 
@@ -918,7 +946,7 @@ namespace Microsoft.ML.RunTests
 
             string extraArgs = string.Format("{0} {1} {2} {3} k={4}", "prexf=Term{col=Label:Cat} prexf=CategoricalTransform{col=Cat01}",
                                                 "xf=TextTransform{col=Text} xf=Concat{col=Features:Cat01,Text}",
-                                                "threads- tr=MultiClassLogisticRegression{numThreads=1}", "norm=No", numFolds);
+                                                "threads- tr=MulticlassLogisticRegression{numThreads=1}", "norm=No", numFolds);
             const string loaderArgs = "loader=TextLoader{col=Label:R4:0 col=Cat:TX:1 col=Cat01:TX:2 col=Text:TX:3 header=+}";
             TestCore("cv", pathData, loaderArgs, extraArgs);
 
@@ -1166,7 +1194,7 @@ namespace Microsoft.ML.RunTests
             const string loaderCmdline = @"loader=TextLoader{col=Label:TX:0 col=Features:R4:1-4 header=+}";
             string pathTrain = GetDataPath("iris-label-name.txt");
             OutputPath trainModel = ModelPath();
-            const string trainArgs = "tr=MultiClassLogisticRegression{maxiter=100 t=-} xf=Term{col=Label} seed=1";
+            const string trainArgs = "tr=MulticlassLogisticRegression{maxiter=100 t=-} xf=Term{col=Label} seed=1";
             TestCore("train", pathTrain, loaderCmdline, trainArgs);
 
             _step++;
@@ -1182,7 +1210,7 @@ namespace Microsoft.ML.RunTests
             Done();
         }
 
-        [LessThanNetCore30OrNotNetCoreFact("netcoreapp3.0 output differs from Baseline")]
+        [Fact]
         [TestCategory(Cat), TestCategory("Multiclass"), TestCategory("Logistic Regression")]
         public void CommandTrainMlrWithStats()
         {
@@ -1358,7 +1386,7 @@ namespace Microsoft.ML.RunTests
         [Fact(Skip = "Need CoreTLC specific baseline update")]
         public void CommandDefaultLearners()
         {
-            string pathData = GetDataPath("breast-cancer.txt");
+            string pathData = GetDataPath(TestDatasets.breastCancer.trainFilename);
             TestCore("train", pathData, "", "seed=1 norm=Warn");
 
             _step++;
@@ -1448,13 +1476,13 @@ namespace Microsoft.ML.RunTests
 
         [TestCategory(Cat), TestCategory("Multiclass")]
         [Fact(Skip = "Need CoreTLC specific baseline update")]
-        public void CommandTrainScoreEvaluateMultiClass()
+        public void CommandTrainScoreEvaluateMulticlass()
         {
             // First run a training.
             string pathData = GetDataPath("iris-label-name.txt");
             OutputPath trainModel = ModelPath();
             TestCore("train", pathData, "loader=TextLoader{header+ col=Label:TX:0 col=Features:1-4} xf=Term{col=Label}",
-                "lab=Label feat=Features seed=42 tr=MultiClassNeuralNetwork{output=3 accel=sse lr=0.1 iter=70} norm=Warn");
+                "lab=Label feat=Features seed=42 tr=MulticlassNeuralNetwork{output=3 accel=sse lr=0.1 iter=70} norm=Warn");
 
             // Then, run the score.
             _step++;
@@ -1478,7 +1506,7 @@ namespace Microsoft.ML.RunTests
             _step++;
             var outputFile2 = StdoutPath();
             var metricsPath = MetricsPath();
-            const string evalLoaderArgs = "loader=Text{header+ col=Label:TX:0 col=PredictedLabel:5 col=Score:6-8} xf=Term{col=Label} evaluator=MultiClass{score=Score}";
+            const string evalLoaderArgs = "loader=Text{header+ col=Label:TX:0 col=PredictedLabel:5 col=Score:6-8} xf=Term{col=Label} evaluator=Multiclass{score=Score}";
             TestCore("evaluate", scorePathTxt.Path, evalLoaderArgs, null, metricsPath.Arg("dout"));
 
             // Check that the evaluations produced the same result.
@@ -1488,7 +1516,7 @@ namespace Microsoft.ML.RunTests
             //CheckEqualityFromPathsCore(TestContext.TestName, outputFile1.Path, outputFile2.Path);
 
             _step++;
-            const string evalLoaderArgs2 = "loader=Text{header+ col=Label:0 col=PredictedLabel:5 col=Score:6-8} evaluator=MultiClass{score=Score opcs+}";
+            const string evalLoaderArgs2 = "loader=Text{header+ col=Label:0 col=PredictedLabel:5 col=Score:6-8} evaluator=Multiclass{score=Score opcs+}";
             TestCore("evaluate", scorePathTxt.Path, evalLoaderArgs2, null, metricsPath.Arg("dout"));
 
             Done();
@@ -1499,7 +1527,7 @@ namespace Microsoft.ML.RunTests
         public void CommandTrainScoreEvaluateUncalibratedBinary()
         {
             // First run a training.
-            string pathData = GetDataPath("breast-cancer.txt");
+            string pathData = GetDataPath(TestDatasets.breastCancer.trainFilename);
             OutputPath trainModel = ModelPath();
             TestCore("train", pathData, "loader=TextLoader xf[norm]=MinMax{col=Features}", "tr=ap{shuf=-} cali={}");
 
@@ -1742,7 +1770,7 @@ namespace Microsoft.ML.RunTests
             Done();
         }
 
-        [TestCategory(Cat), TestCategory("Dracula")]
+        [TestCategory(Cat), TestCategory("CountTargetEncoding")]
         [Fact(Skip = "Need CoreTLC specific baseline update")]
         public void CommandDraculaInfer()
         {
@@ -1955,7 +1983,7 @@ namespace Microsoft.ML.RunTests
         {
             const string loaderArgs = "loader=text{col=Label:0 col=Features:1-*}";
             const string extraArgs = "xf=minmax{col=Features} tr=ffm{d=7 shuf- iters=3 norm-}";
-            string data = GetDataPath("breast-cancer.txt");
+            string data = GetDataPath(TestDatasets.breastCancer.trainFilename);
             OutputPath model = ModelPath();
 
             TestCore("traintest", data, loaderArgs, extraArgs + " test=" + data);
@@ -1971,7 +1999,7 @@ namespace Microsoft.ML.RunTests
         {
             const string loaderArgs = "loader=text{col=Label:0 col=FieldA:1-2 col=FieldB:3-4 col=FieldC:5-6 col=FieldD:7-9}";
             const string extraArgs = "tr=ffm{d=7 shuf- iters=3} col[Feature]=FieldA col[Feature]=FieldB col[Feature]=FieldC col[Feature]=FieldD";
-            string data = GetDataPath("breast-cancer.txt");
+            string data = GetDataPath(TestDatasets.breastCancer.trainFilename);
             OutputPath model = ModelPath();
 
             TestCore("traintest", data, loaderArgs, extraArgs + " test=" + data, digitsOfPrecision: 5);
@@ -2040,7 +2068,7 @@ namespace Microsoft.ML.RunTests
         {
             const string loaderArgs = "loader=text{col=Label:0 col=Features:1-*}";
             const string extraArgs = "xf=minmax{col=Features} tr=ffm{d=5 shuf- iters=2 norm-}";
-            string data = GetDataPath("breast-cancer.txt");
+            string data = GetDataPath(TestDatasets.breastCancer.trainFilename);
             OutputPath model = ModelPath();
 
             TestCore("traintest", data, loaderArgs, extraArgs + " test=" + data);
@@ -2070,7 +2098,7 @@ namespace Microsoft.ML.RunTests
         {
             const string loaderArgs = "loader=text{col=Label:0 col=FieldA:1-2 col=FieldB:3-4 col=FieldC:5-6 col=FieldD:7-9}";
             const string extraArgs = "tr=ffm{d=5 shuf- iters=2} col[Feature]=FieldA col[Feature]=FieldB col[Feature]=FieldC col[Feature]=FieldD";
-            string data = GetDataPath("breast-cancer.txt");
+            string data = GetDataPath(TestDatasets.breastCancer.trainFilename);
             OutputPath model = ModelPath();
 
             TestCore("traintest", data, loaderArgs, extraArgs + " test=" + data);
@@ -2124,6 +2152,43 @@ namespace Microsoft.ML.RunTests
 
         [TestCategory("DataPipeSerialization")]
         [Fact()]
+        public void SavePipeTextLoaderWithMultilines()
+        {
+            string dataPath = GetDataPath("multiline-escapechar.csv");
+            const string loaderArgs = "loader=text{sep=, quote+ multilines+ header+ escapechar=\\ col=id:Num:0 col=description:TX:1 col=animal:TX:2}";
+
+            OutputPath modelPath = ModelPath();
+            string extraArgs = null;
+            TestCore("showdata", dataPath, loaderArgs, extraArgs);
+
+            _step++;
+
+            TestCore("showdata", dataPath, string.Format("in={{{0}}}", modelPath.Path), "");
+            Done();
+        }
+
+        [TestCategory("DataPipeSerialization")]
+        [Fact()]
+        public void SavePipeTextLoaderWithMissingRealsAsNaNs()
+        {
+            string dataPath = GetDataPath("missing_fields.csv");
+            const string loaderArgs = "loader=text{sep=, quote+ multilines+ header+ escapechar=\\ missingrealnan+ " +
+                "col=id:Num:0 col=description:TX:1 col=date:DT:4 " +
+                "col=sing1:R4:2 col=sing2:R4:3 col=singFt1:R4:2-3 " +
+                "col=doubFt:R8:2-3,5-6}";
+
+            OutputPath modelPath = ModelPath();
+            string extraArgs = null;
+            TestCore("showdata", dataPath, loaderArgs, extraArgs);
+
+            _step++;
+
+            TestCore("showdata", dataPath, string.Format("in={{{0}}}", modelPath.Path), "");
+            Done();
+        }
+
+        [TestCategory("DataPipeSerialization")]
+        [Fact()]
         public void SavePipeChooseColumnsByIndexDrop()
         {
             string dataPath = GetDataPath("adult.tiny.with-schema.txt");
@@ -2137,6 +2202,76 @@ namespace Microsoft.ML.RunTests
             _step++;
 
             TestCore("showdata", dataPath, string.Format("in={{{0}}}", modelPath.Path), "");
+            Done();
+        }
+
+        [Fact]
+        public void CommandShowDataSvmLight()
+        {
+            // Test with a specified size parameter. The "6" feature should be omitted.
+            // Also the blank and completely fully commented lines should be omitted,
+            // and the feature 2:3 that appears in the comment should not appear.
+            var path = CreateOutputPath("DataA.txt");
+            File.WriteAllLines(path.Path, new string[] {
+                "1\t1:3\t4:6",
+                "  -1 cost:5\t2:4 \t4:7\t6:-1   ",
+                "",
+                "1\t5:-2 # A comment! 2:3",
+                "# What a nice full line comment",
+                "1 cost:0.5\t2:3.14159",
+            });
+            var pathA = path.Path;
+            const string chooseXf = " xf=select{keepcol=Label keepcol=Weight keepcol=GroupId keepcol=Comment keepcol=Features}";
+            TestReloadedCore("showdata", path.Path, "loader=svm{size=5}" + chooseXf, "", "");
+
+            // Test with autodetermined sizes. The the "6" feature should be included,
+            // and the feature vector should have length 6.
+            _step++;
+            TestCore("showdata", path.Path, "loader=svm" + chooseXf, "");
+
+            // Test with a term mapping, instead of the actual SVM^light format that
+            // requires positive integers. ALso check that qid works here.
+            _step++;
+            var modelPath = ModelPath();
+            path = CreateOutputPath("DataB.txt");
+            File.WriteAllLines(path.Path, new string[] {
+                "1 qid:1 aurora:3.14159 beachwood:123",
+                "-1 qid:5 beachwood:345 chagrin:-21",
+            });
+            TestReloadedCore("showdata", path.Path, "loader=svm{indices=names}" + chooseXf, "", "");
+
+            // We reload the model, but on a new set of data. The "euclid" key should be
+            // ignored as it would not have been detected by the term transform.
+            _step++;
+            path = CreateOutputPath("DataC.txt");
+            File.WriteAllLines(path.Path, new string[] {
+                "-1 aurora:1 chagrin:2",
+                "1 chagrin:3 euclid:4"
+            });
+            TestInCore("showdata", path.Path, modelPath, "");
+
+            _step++;
+            path = CreateOutputPath("DataD.txt");
+            File.WriteAllLines(path.Path, new string[] { "1 aurora:2 :3" });
+            TestReloadedCore("showdata", path.Path, "loader=svm{indices=names}" + chooseXf, "", "");
+
+            _step++;
+
+            // If we specify the size parameter, and zero-based feature indices, both indices 5 and 6 should
+            // not appear.
+            TestReloadedCore("showdata", pathA, "loader=svm{size=5 indices=zerobased}" + chooseXf, "", "");
+
+            Done();
+        }
+
+        [Fact]
+        public void CommandSaveDataSvmLight()
+        {
+            string pathData = GetDataPath("breast-cancer-withheader.txt");
+            OutputPath dataPath = CreateOutputPath("data.txt");
+            TestReloadedCore("savedata", pathData, "loader=text{header+}", "saver=svmlight{b+}", null, dataPath.Arg("dout"));
+            dataPath = CreateOutputPath("data-0.txt");
+            TestReloadedCore("savedata", pathData, "loader=text{header+}", "saver=svmlight{zero+}", null, dataPath.Arg("dout"));
             Done();
         }
     }

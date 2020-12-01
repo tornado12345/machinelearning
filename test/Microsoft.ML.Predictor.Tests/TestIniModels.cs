@@ -7,6 +7,7 @@ using System.IO;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Model;
+using Microsoft.ML.TestFrameworkCommon;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -315,7 +316,7 @@ namespace Microsoft.ML.RunTests
                         );
                 }
             }
-            Assert.IsTrue(failureTestInformation.Count <= 0);
+            Assert.True(failureTestInformation.Count <= 0);
         }
 
         /// <summary>
@@ -351,7 +352,7 @@ namespace Microsoft.ML.RunTests
             string modelFilePath = GetOutputPath(runParameters.BaselineDir, runParameters.ModelFilename);
             string trainDatasetPath = GetDataPath(trainDataset);
             string evaluationOutputDir = GetOutputDir(evaluationOutputDirPrefix + @"\Dirs\" + outName);
-            Assert.IsNull(EnsureEmptyDirectory(evaluationOutputDir));
+            Assert.Null(EnsureEmptyDirectory(evaluationOutputDir));
 
             string cmd = string.Format(EvaluationCommandLineFormat, modelFilePath, evaluationOutputDir, trainDatasetPath);
             string dir = Path.GetFullPath(EvaluationExecutorDir);
@@ -524,10 +525,10 @@ namespace Microsoft.ML.RunTests
                             new TextLoader.Column("Label", DataKind.Single, 0),
                             new TextLoader.Column("Features", DataKind.Single, 1, 9)
                         }
-                    }).Load(GetDataPath("breast-cancer.txt"));
+                    }).Load(GetDataPath(TestDatasets.breastCancer.trainFilename));
 
             var pipeline = mlContext.Transforms.ReplaceMissingValues("Features")
-                .Append(mlContext.Regression.Trainers.GeneralizedAdditiveModels());
+                .Append(mlContext.Regression.Trainers.Gam());
             var model = pipeline.Fit(idv);
             var data = model.Transform(idv);
 
@@ -563,10 +564,10 @@ namespace Microsoft.ML.RunTests
                             new TextLoader.Column("Label", DataKind.Boolean, 0),
                             new TextLoader.Column("Features", DataKind.Single, 1, 9)
                         }
-                    }).Load(GetDataPath("breast-cancer.txt"));
+                    }).Load(GetDataPath(TestDatasets.breastCancer.trainFilename));
 
             var pipeline = mlContext.Transforms.ReplaceMissingValues("Features")
-                .Append(mlContext.BinaryClassification.Trainers.GeneralizedAdditiveModels());
+                .Append(mlContext.BinaryClassification.Trainers.Gam());
             var model = pipeline.Fit(idv);
             var data = model.Transform(idv);
 

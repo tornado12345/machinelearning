@@ -2,7 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Microsoft.Data.DataView;
 using Microsoft.ML.Runtime;
 
 namespace Microsoft.ML.Data
@@ -18,7 +17,10 @@ namespace Microsoft.ML.Data
         /// <remarks>
         /// The area under the ROC curve is equal to the probability that the classifier ranks
         /// a randomly chosen positive instance higher than a randomly chosen negative one
-        /// (assuming 'positive' ranks higher than 'negative').
+        /// (assuming 'positive' ranks higher than 'negative'). Area under the ROC curve ranges between
+        /// 0 and 1, with a value closer to 1 indicating a better model.
+        ///
+        /// <a href="https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve">Area Under ROC Curve</a>
         /// </remarks>
         public double AreaUnderRocCurve { get; }
 
@@ -56,10 +58,12 @@ namespace Microsoft.ML.Data
         public double NegativeRecall { get; }
 
         /// <summary>
-        /// Gets the F1 score of the classifier.
+        /// Gets the F1 score of the classifier, which is a measure of the classifier's quality considering
+        /// both precision and recall.
         /// </summary>
         /// <remarks>
         /// F1 score is the harmonic mean of precision and recall: 2 * precision * recall / (precision + recall).
+        /// F1 ranges between 0 and 1, with a value of 1 indicating perfect precision and recall.
         /// </remarks>
         public double F1Score { get; }
 
@@ -75,6 +79,12 @@ namespace Microsoft.ML.Data
         /// </remarks>
         public double AreaUnderPrecisionRecallCurve { get; }
 
+        /// <summary>
+        /// The <a href="https://en.wikipedia.org/wiki/Confusion_matrix">confusion matrix</a> giving the counts of the
+        /// true positives, true negatives, false positives and false negatives for the two classes of data.
+        /// </summary>
+        public ConfusionMatrix ConfusionMatrix { get; }
+
         private protected static T Fetch<T>(IExceptionContext ectx, DataViewRow row, string name)
         {
             var column = row.Schema.GetColumnOrNull(name);
@@ -85,9 +95,9 @@ namespace Microsoft.ML.Data
             return val;
         }
 
-        internal BinaryClassificationMetrics(IExceptionContext ectx, DataViewRow overallResult)
+        internal BinaryClassificationMetrics(IHost host, DataViewRow overallResult, IDataView confusionMatrix)
         {
-            double Fetch(string name) => Fetch<double>(ectx, overallResult, name);
+            double Fetch(string name) => Fetch<double>(host, overallResult, name);
             AreaUnderRocCurve = Fetch(BinaryClassifierEvaluator.Auc);
             Accuracy = Fetch(BinaryClassifierEvaluator.Accuracy);
             PositivePrecision = Fetch(BinaryClassifierEvaluator.PosPrecName);
@@ -96,6 +106,7 @@ namespace Microsoft.ML.Data
             NegativeRecall = Fetch(BinaryClassifierEvaluator.NegRecallName);
             F1Score = Fetch(BinaryClassifierEvaluator.F1);
             AreaUnderPrecisionRecallCurve = Fetch(BinaryClassifierEvaluator.AuPrc);
+            ConfusionMatrix = MetricWriter.GetConfusionMatrix(host, confusionMatrix);
         }
 
         [BestFriend]
@@ -110,6 +121,13 @@ namespace Microsoft.ML.Data
             NegativeRecall = negativeRecall;
             F1Score = f1Score;
             AreaUnderPrecisionRecallCurve = auprc;
+        }
+
+        internal BinaryClassificationMetrics(double auc, double accuracy, double positivePrecision, double positiveRecall,
+            double negativePrecision, double negativeRecall, double f1Score, double auprc, ConfusionMatrix confusionMatrix)
+            : this(auc, accuracy, positivePrecision, positiveRecall, negativePrecision, negativeRecall, f1Score, auprc)
+        {
+            ConfusionMatrix = confusionMatrix;
         }
     }
 }

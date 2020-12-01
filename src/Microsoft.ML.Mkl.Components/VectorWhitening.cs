@@ -7,13 +7,13 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.CpuMath;
 using Microsoft.ML.Internal.Internallearn;
 using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Transforms;
 
@@ -47,7 +47,6 @@ namespace Microsoft.ML.Transforms
         ZeroPhaseComponentAnalysis
     }
 
-    /// <include file='doc.xml' path='doc/members/member[@name="Whitening"]/*'/>
     public sealed class VectorWhiteningTransformer : OneToOneTransformerBase
     {
         internal sealed class Options
@@ -220,7 +219,7 @@ namespace Microsoft.ML.Transforms
         // Check if the input column's type is supported. Note that only float vector with a known shape is allowed.
         internal static string TestColumn(DataViewType type)
         {
-            VectorType vectorType = type as VectorType;
+            VectorDataViewType vectorType = type as VectorDataViewType;
             DataViewType itemType = vectorType?.ItemType ?? type;
             if ((vectorType != null && !vectorType.IsKnownSize && vectorType.Dimensions.Length > 1)
                 || itemType != NumberDataViewType.Single)
@@ -308,7 +307,7 @@ namespace Microsoft.ML.Transforms
 
             for (int i = 0; i < columns.Length; i++)
             {
-                VectorType vectorType = srcTypes[i] as VectorType;
+                VectorDataViewType vectorType = srcTypes[i] as VectorDataViewType;
                 ch.Assert(vectorType != null && vectorType.IsKnownSize);
                 // Use not more than MaxRow number of rows.
                 var ex = columns[i];
@@ -399,7 +398,7 @@ namespace Microsoft.ML.Transforms
                 ch.Info("Computing SVD...");
                 var eigValues = new float[ccol]; // Eigenvalues.
                 var unconv = new float[ccol]; // Superdiagonal unconverged values (if any). Not used but seems to be required by MKL.
-                // After the next call, values in U will be ovewritten by left eigenvectors.
+                // After the next call, values in U will be overwritten by left eigenvectors.
                 // Each column in U will be an eigenvector.
                 int r = Mkl.Svd(Layout, Mkl.SvdJob.MinOvr, Mkl.SvdJob.None,
                     ccol, ccol, u, ccol, eigValues, null, ccol, null, ccol, unconv);
@@ -548,7 +547,7 @@ namespace Microsoft.ML.Transforms
         private protected override IRowMapper MakeRowMapper(DataViewSchema schema)
             => new Mapper(this, schema);
 
-        private sealed class Mapper : OneToOneMapperBase
+        private sealed class Mapper : OneToOneMapperBase, ISaveAsOnnx
         {
             private readonly VectorWhiteningTransformer _parent;
             private readonly int[] _cols;
@@ -589,7 +588,7 @@ namespace Microsoft.ML.Transforms
                     InputSchema.TryGetColumnIndex(_parent.ColumnPairs[iinfo].inputColumnName, out int colIndex);
                     Host.Assert(colIndex >= 0);
                     var info = _parent._columns[iinfo];
-                    DataViewType outType = (info.Kind == WhiteningKind.PrincipalComponentAnalysis && info.Rank > 0) ? new VectorType(NumberDataViewType.Single, info.Rank) : _srcTypes[iinfo];
+                    DataViewType outType = (info.Kind == WhiteningKind.PrincipalComponentAnalysis && info.Rank > 0) ? new VectorDataViewType(NumberDataViewType.Single, info.Rank) : _srcTypes[iinfo];
                     result[iinfo] = new DataViewSchema.DetachedColumn(_parent.ColumnPairs[iinfo].outputColumnName, outType, null);
                 }
                 return result;
@@ -609,6 +608,7 @@ namespace Microsoft.ML.Transforms
                 // Notice that here that the learned matrices in _models will have the same size for both PCA and ZCA,
                 // so we perform a truncation of the matrix in FillValues, that only keeps PcaNum columns.
                 int cslotDst = (ex.Kind == WhiteningKind.PrincipalComponentAnalysis && ex.Rank > 0) ? ex.Rank : cslotSrc;
+
                 var model = _parent._models[iinfo];
                 ValueGetter<VBuffer<float>> del =
                     (ref VBuffer<float> dst) =>
@@ -618,6 +618,54 @@ namespace Microsoft.ML.Transforms
                         FillValues(model, ref src, ref dst, cslotDst);
                     };
                 return del;
+            }
+
+            public bool CanSaveOnnx(OnnxContext ctx) => true;
+
+            public void SaveAsOnnx(OnnxContext ctx)
+            {
+                Host.CheckValue(ctx, nameof(ctx));
+                int numColumns = _parent.ColumnPairs.Length;
+                for (int iinfo = 0; iinfo < numColumns; ++iinfo)
+                {
+                    string inputColumnName = _parent.ColumnPairs[iinfo].inputColumnName;
+                    if (!ctx.ContainsColumn(inputColumnName))
+                        continue;
+
+                    string outputColumnName = _parent.ColumnPairs[iinfo].outputColumnName;
+                    string srcVariableName = ctx.GetVariableName(inputColumnName);
+                    string dstVariableName = ctx.AddIntermediateVariable(_srcTypes[iinfo], outputColumnName, true);
+                    SaveAsOnnxCore(ctx, iinfo, srcVariableName, dstVariableName);
+                }
+            }
+
+            private void SaveAsOnnxCore(OnnxContext ctx, int iinfo, string srcVariableName, string dstVariableName)
+            {
+                const int minimumOpSetVersion = 9;
+                ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
+
+                var model = _parent._models[iinfo];
+                int dimension = _srcTypes[iinfo].GetValueCount();
+                Host.Assert(model.Length == dimension * dimension);
+
+                var parameters = _parent._columns[iinfo];
+                Host.Assert(parameters.Kind == WhiteningKind.PrincipalComponentAnalysis || parameters.Kind == WhiteningKind.ZeroPhaseComponentAnalysis);
+
+                int rank = (parameters.Kind == WhiteningKind.PrincipalComponentAnalysis && parameters.Rank > 0) ? parameters.Rank : dimension;
+                Host.CheckParam(rank <= dimension, nameof(rank), "Rank must be at most the dimension of untransformed data.");
+
+                long[] modelDimension = { rank, dimension };
+
+                var opType = "Gemm";
+                var modelName = ctx.AddInitializer(model.Take(rank * dimension), modelDimension, "model");
+                var zeroValueName = ctx.AddInitializer((float)0);
+
+                var gemmOutput = ctx.AddIntermediateVariable(null, "GemmOutput", true);
+                var node = ctx.CreateNode(opType, new[] { modelName, srcVariableName, zeroValueName }, new[] { gemmOutput }, ctx.GetNodeName(opType), "");
+                node.AddAttribute("transB", 1);
+
+                opType = "Transpose";
+                ctx.CreateNode(opType, new[] { gemmOutput }, new[] { dstVariableName }, ctx.GetNodeName(opType), "");
             }
 
             private ValueGetter<T> GetSrcGetter<T>(DataViewRow input, int iinfo)
@@ -667,7 +715,6 @@ namespace Microsoft.ML.Transforms
         }
     }
 
-    /// <include file='doc.xml' path='doc/members/member[@name="Whitening"]/*'/>
     public sealed class VectorWhiteningEstimator : IEstimator<VectorWhiteningTransformer>
     {
         [BestFriend]
@@ -683,7 +730,8 @@ namespace Microsoft.ML.Transforms
         /// <summary>
         /// Describes how the transformer handles one column pair.
         /// </summary>
-        public sealed class ColumnOptions
+        [BestFriend]
+        internal sealed class ColumnOptions
         {
             /// <summary>
             /// Name of the column resulting from the transformation of <see cref="InputColumnName"/>.
@@ -801,7 +849,6 @@ namespace Microsoft.ML.Transforms
         private readonly IHost _host;
         private readonly ColumnOptions[] _infos;
 
-        /// <include file='doc.xml' path='doc/members/member[@name="Whitening"]/*'/>
         /// <param name="env">The environment.</param>
         /// <param name="columns">Describes the parameters of the whitening process for each column pair.</param>
         internal VectorWhiteningEstimator(IHostEnvironment env, params ColumnOptions[] columns)
@@ -810,7 +857,6 @@ namespace Microsoft.ML.Transforms
             _infos = columns;
         }
 
-        /// <include file='doc.xml' path='doc/members/member[@name="Whitening"]/*'/>
         /// <param name="env">The environment.</param>
         /// <param name="outputColumnName">Name of the column resulting from the transformation of <paramref name="inputColumnName"/>.</param>
         /// <param name="inputColumnName">Name of column to transform. If set to <see langword="null"/>, the value of the <paramref name="outputColumnName"/> will be used as source.</param>

@@ -5,7 +5,6 @@
 using System;
 using System.IO;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Data.IO;
 using Microsoft.ML.Internal.Utilities;
@@ -21,6 +20,9 @@ namespace Microsoft.ML.Transforms
         /// </summary>
         private abstract class Builder
         {
+            private static readonly FuncStaticMethodInfo1<PrimitiveDataViewType, bool, Builder> _createCoreMethodInfo
+                = new FuncStaticMethodInfo1<PrimitiveDataViewType, bool, Builder>(CreateCore<int>);
+
             /// <summary>
             /// The item type we are building into a term map.
             /// </summary>
@@ -37,22 +39,22 @@ namespace Microsoft.ML.Transforms
                 ItemType = type;
             }
 
-            public static Builder Create(DataViewType type, ValueToKeyMappingEstimator.SortOrder sortOrder)
+            public static Builder Create(DataViewType type, ValueToKeyMappingEstimator.KeyOrdinality sortOrder)
             {
                 Contracts.AssertValue(type);
-                Contracts.Assert(type is VectorType || type is PrimitiveDataViewType);
+                Contracts.Assert(type is VectorDataViewType || type is PrimitiveDataViewType);
                 // Right now we have only two. This "public" interface externally looks like it might
                 // accept any value, but currently the internal implementations of Builder are split
                 // along this being a purely binary option, for now (though this can easily change
                 // with mot implementations of Builder).
-                Contracts.Assert(sortOrder == ValueToKeyMappingEstimator.SortOrder.Occurrence || sortOrder == ValueToKeyMappingEstimator.SortOrder.Value);
-                bool sorted = sortOrder == ValueToKeyMappingEstimator.SortOrder.Value;
+                Contracts.Assert(sortOrder == ValueToKeyMappingEstimator.KeyOrdinality.ByOccurrence || sortOrder == ValueToKeyMappingEstimator.KeyOrdinality.ByValue);
+                bool sorted = sortOrder == ValueToKeyMappingEstimator.KeyOrdinality.ByValue;
 
                 PrimitiveDataViewType itemType = type.GetItemType() as PrimitiveDataViewType;
                 Contracts.AssertValue(itemType);
                 if (itemType is TextDataViewType)
                     return new TextImpl(sorted);
-                return Utils.MarshalInvoke(CreateCore<int>, itemType.RawType, itemType, sorted);
+                return Utils.MarshalInvoke(_createCoreMethodInfo, itemType.RawType, itemType, sorted);
             }
 
             private static Builder CreateCore<T>(PrimitiveDataViewType type, bool sorted)
@@ -65,7 +67,7 @@ namespace Microsoft.ML.Transforms
                 // of building our term dictionary. For the other types (practically, only the UX types),
                 // we should ignore nothing.
                 InPredicate<T> mapsToMissing;
-                if (!Data.Conversion.Conversions.Instance.TryGetIsNAPredicate(type, out mapsToMissing))
+                if (!Data.Conversion.Conversions.DefaultInstance.TryGetIsNAPredicate(type, out mapsToMissing))
                     mapsToMissing = (in T val) => false;
                 return new Impl<T>(type, mapsToMissing, sorted);
             }
@@ -205,7 +207,7 @@ namespace Microsoft.ML.Transforms
             public override void ParseAddTermArg(ref ReadOnlyMemory<char> terms, IChannel ch)
             {
                 T val;
-                var tryParse = Data.Conversion.Conversions.Instance.GetTryParseConversion<T>(ItemType);
+                var tryParse = Data.Conversion.Conversions.DefaultInstance.GetTryParseConversion<T>(ItemType);
                 for (bool more = true; more;)
                 {
                     ReadOnlyMemory<char> term;
@@ -231,7 +233,7 @@ namespace Microsoft.ML.Transforms
             public override void ParseAddTermArg(string[] terms, IChannel ch)
             {
                 T val;
-                var tryParse = Data.Conversion.Conversions.Instance.GetTryParseConversion<T>(ItemType);
+                var tryParse = Data.Conversion.Conversions.DefaultInstance.GetTryParseConversion<T>(ItemType);
                 foreach (var sterm in terms)
                 {
                     ReadOnlyMemory<char> term = sterm.AsMemory();
@@ -291,7 +293,7 @@ namespace Microsoft.ML.Transforms
                 Contracts.Assert(autoConvert || bldr.ItemType == type.GetItemType());
                 // Auto conversion should only be possible when the type is text.
                 Contracts.Assert(type is TextDataViewType || !autoConvert);
-                if (type is VectorType)
+                if (type is VectorDataViewType)
                     return Utils.MarshalInvoke(CreateVec<int>, bldr.ItemType.RawType, row, col, count, bldr);
                 return Utils.MarshalInvoke(CreateOne<int>, bldr.ItemType.RawType, row, col, autoConvert, count, bldr);
             }
@@ -489,7 +491,7 @@ namespace Microsoft.ML.Transforms
             /// key types so they are capable of distinguishing between the set they index being
             /// empty vs. of unknown or unbound cardinality, this should change.
             /// </summary>
-            public readonly KeyType OutputType;
+            public readonly KeyDataViewType OutputType;
 
             /// <summary>
             /// The number of items in the map.
@@ -502,7 +504,7 @@ namespace Microsoft.ML.Transforms
                 Contracts.Assert(count >= 0);
                 ItemType = type;
                 Count = count;
-                OutputType = new KeyType(typeof(uint), Count == 0 ? 1 : Count);
+                OutputType = new KeyDataViewType(typeof(uint), Count == 0 ? 1 : Count);
             }
 
             internal abstract void Save(ModelSaveContext ctx, IHostEnvironment host, CodecFactory codecFactory);
@@ -746,7 +748,7 @@ namespace Microsoft.ML.Transforms
                 {
                     writer.WriteLine("# Number of terms of type '{0}' = {1}", ItemType, Count);
                     StringBuilder sb = null;
-                    var stringMapper = Data.Conversion.Conversions.Instance.GetStringConversion<T>(ItemType);
+                    var stringMapper = Data.Conversion.Conversions.DefaultInstance.GetStringConversion<T>(ItemType);
                     for (int i = 0; i < _values.Count; ++i)
                     {
                         T val = _values.GetItem(i);
@@ -828,7 +830,7 @@ namespace Microsoft.ML.Transforms
 
                 Map = map;
                 _iinfo = iinfo;
-                _inputIsVector = info.TypeSrc is VectorType;
+                _inputIsVector = info.TypeSrc is VectorDataViewType;
             }
 
             public static BoundTermMap Create(IHostEnvironment host, DataViewSchema schema, TermMap map, ColInfo[] infos, bool[] textMetadata, int iinfo)
@@ -844,7 +846,7 @@ namespace Microsoft.ML.Transforms
             public static BoundTermMap CreateCore<T>(IHostEnvironment env, DataViewSchema schema, TermMap map, ColInfo[] infos, bool[] textMetadata, int iinfo)
             {
                 TermMap<T> mapT = (TermMap<T>)map;
-                if (mapT.ItemType is KeyType)
+                if (mapT.ItemType is KeyDataViewType)
                     return new KeyImpl<T>(env, schema, mapT, infos, textMetadata, iinfo);
                 return new Impl<T>(env, schema, mapT, infos, textMetadata, iinfo);
             }
@@ -905,7 +907,7 @@ namespace Microsoft.ML.Transforms
                         ValueMapper<T, uint> map = TypedMap.GetKeyMapper();
                         var info = _infos[_iinfo];
                         T src = default(T);
-                        Contracts.Assert(!(info.TypeSrc is VectorType));
+                        Contracts.Assert(!(info.TypeSrc is VectorDataViewType));
                         var inputColumn = input.Schema[info.InputColumnName];
                         _host.Assert(input.IsColumnActive(inputColumn));
                         var getSrc = input.GetGetter<T>(inputColumn);
@@ -1044,7 +1046,7 @@ namespace Microsoft.ML.Transforms
                         return;
                     if (IsTextMetadata && !(TypedMap.ItemType is TextDataViewType))
                     {
-                        var conv = Data.Conversion.Conversions.Instance;
+                        var conv = Data.Conversion.Conversions.DefaultInstance;
                         var stringMapper = conv.GetStringConversion<T>(TypedMap.ItemType);
 
                         ValueGetter<VBuffer<ReadOnlyMemory<char>>> getter =
@@ -1075,10 +1077,16 @@ namespace Microsoft.ML.Transforms
             /// </summary>
             private sealed class KeyImpl<T> : Base<T>
             {
+                private static readonly FuncInstanceMethodInfo1<KeyImpl<T>, DataViewType, DataViewSchema.Annotations.Builder, bool> _addMetadataCoreMethodInfo
+                    = FuncInstanceMethodInfo1<KeyImpl<T>, DataViewType, DataViewSchema.Annotations.Builder, bool>.Create(target => target.AddMetadataCore<int>);
+
+                private static readonly FuncInstanceMethodInfo1<KeyImpl<T>, PrimitiveDataViewType, TextWriter, bool> _writeTextTermsCoreMethodInfo
+                    = FuncInstanceMethodInfo1<KeyImpl<T>, PrimitiveDataViewType, TextWriter, bool>.Create(target => target.WriteTextTermsCore<int>);
+
                 public KeyImpl(IHostEnvironment env, DataViewSchema schema, TermMap<T> map, ColInfo[] infos, bool[] textMetadata, int iinfo)
                     : base(env, schema, map, infos, textMetadata, iinfo)
                 {
-                    _host.Assert(TypedMap.ItemType is KeyType);
+                    _host.Assert(TypedMap.ItemType is KeyDataViewType);
                 }
 
                 public override void AddMetadata(DataViewSchema.Annotations.Builder builder)
@@ -1087,9 +1095,9 @@ namespace Microsoft.ML.Transforms
                         return;
 
                     _schema.TryGetColumnIndex(_infos[_iinfo].InputColumnName, out int srcCol);
-                    VectorType srcMetaType = _schema[srcCol].Annotations.Schema.GetColumnOrNull(AnnotationUtils.Kinds.KeyValues)?.Type as VectorType;
+                    VectorDataViewType srcMetaType = _schema[srcCol].Annotations.Schema.GetColumnOrNull(AnnotationUtils.Kinds.KeyValues)?.Type as VectorDataViewType;
                     if (srcMetaType == null || srcMetaType.Size != TypedMap.ItemType.GetKeyCountAsInt32(_host) ||
-                        TypedMap.ItemType.GetKeyCountAsInt32(_host) == 0 || !Utils.MarshalInvoke(AddMetadataCore<int>, srcMetaType.ItemType.RawType, srcMetaType.ItemType, builder))
+                        TypedMap.ItemType.GetKeyCountAsInt32(_host) == 0 || !Utils.MarshalInvoke(_addMetadataCoreMethodInfo, this, srcMetaType.ItemType.RawType, srcMetaType.ItemType, builder))
                     {
                         // No valid input key-value metadata. Back off to the base implementation.
                         base.AddMetadata(builder);
@@ -1101,10 +1109,10 @@ namespace Microsoft.ML.Transforms
                     _host.AssertValue(srcMetaType);
                     _host.Assert(srcMetaType.RawType == typeof(TMeta));
                     _host.AssertValue(builder);
-                    var srcType = TypedMap.ItemType as KeyType;
+                    var srcType = TypedMap.ItemType as KeyDataViewType;
                     _host.AssertValue(srcType);
-                    var dstType = new KeyType(typeof(uint), srcType.Count);
-                    var convInst = Data.Conversion.Conversions.Instance;
+                    var dstType = new KeyDataViewType(typeof(uint), srcType.Count);
+                    var convInst = Data.Conversion.Conversions.DefaultInstance;
                     ValueMapper<T, uint> conv;
                     bool identity;
                     // If we can't convert this type to U4, don't try to pass along the metadata.
@@ -1168,9 +1176,9 @@ namespace Microsoft.ML.Transforms
                         return;
 
                     _schema.TryGetColumnIndex(_infos[_iinfo].InputColumnName, out int srcCol);
-                    VectorType srcMetaType = _schema[srcCol].Annotations.Schema.GetColumnOrNull(AnnotationUtils.Kinds.KeyValues)?.Type as VectorType;
+                    VectorDataViewType srcMetaType = _schema[srcCol].Annotations.Schema.GetColumnOrNull(AnnotationUtils.Kinds.KeyValues)?.Type as VectorDataViewType;
                     if (srcMetaType == null || srcMetaType.Size != TypedMap.ItemType.GetKeyCountAsInt32(_host) ||
-                        TypedMap.ItemType.GetKeyCountAsInt32(_host) == 0 || !Utils.MarshalInvoke(WriteTextTermsCore<int>, srcMetaType.ItemType.RawType, srcMetaType.ItemType, writer))
+                        TypedMap.ItemType.GetKeyCountAsInt32(_host) == 0 || !Utils.MarshalInvoke(_writeTextTermsCoreMethodInfo, this, srcMetaType.ItemType.RawType, srcMetaType.ItemType, writer))
                     {
                         // No valid input key-value metadata. Back off to the base implementation.
                         base.WriteTextTerms(writer);
@@ -1181,10 +1189,10 @@ namespace Microsoft.ML.Transforms
                 {
                     _host.AssertValue(srcMetaType);
                     _host.Assert(srcMetaType.RawType == typeof(TMeta));
-                    var srcType = TypedMap.ItemType as KeyType;
+                    var srcType = TypedMap.ItemType as KeyDataViewType;
                     _host.AssertValue(srcType);
-                    var dstType = new KeyType(typeof(uint), srcType.Count);
-                    var convInst = Data.Conversion.Conversions.Instance;
+                    var dstType = new KeyDataViewType(typeof(uint), srcType.Count);
+                    var convInst = Data.Conversion.Conversions.DefaultInstance;
                     ValueMapper<T, uint> conv;
                     bool identity;
                     // If we can't convert this type to U4, don't try.

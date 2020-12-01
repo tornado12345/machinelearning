@@ -31,6 +31,10 @@ namespace Microsoft.ML.Runtime
                     {
                         // REVIEW: Will LoadFrom ever return null?
                         Contracts.CheckNonEmpty(path, nameof(path));
+                        if (!File.Exists(path))
+                        {
+                            throw Contracts.ExceptParam(nameof(path), "File does not exist at path: {0}", path);
+                        }
                         var assem = LoadAssembly(env, path);
                         if (assem != null)
                             continue;
@@ -146,7 +150,6 @@ namespace Microsoft.ML.Runtime
                 case "cpumathnative.dll":
                 case "cqo.dll":
                 case "fasttreenative.dll":
-                case "factorizationmachinenative.dll":
                 case "libiomp5md.dll":
                 case "ldanative.dll":
                 case "libvw.dll":

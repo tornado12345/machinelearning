@@ -5,7 +5,6 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -102,7 +101,7 @@ namespace Microsoft.ML.Transforms
         }
 
         internal const string Summary = "Handle missing values by replacing them with either the default value or the "
-            + "mean/min/max value (for non-text columns only). An indicator column can optionally be concatenated, if the" +
+            + "mean/min/max value (for non-text columns only). An indicator column can optionally be concatenated, if the " +
             "input column type is numeric.";
 
         internal const string FriendlyName = "NA Handle Transform";
@@ -154,7 +153,7 @@ namespace Microsoft.ML.Transforms
                 if (!addInd)
                 {
                     replaceCols.Add(new MissingValueReplacingEstimator.ColumnOptions(column.Name, column.Source,
-                        (MissingValueReplacingEstimator.ColumnOptions.ReplacementMode)(column.Kind ?? options.ReplaceWith), column.ImputeBySlot ?? options.ImputeBySlot));
+                        (MissingValueReplacingEstimator.ReplacementMode)(column.Kind ?? options.ReplaceWith), column.ImputeBySlot ?? options.ImputeBySlot));
                     continue;
                 }
 
@@ -164,7 +163,7 @@ namespace Microsoft.ML.Transforms
                     throw h.Except("Column '{0}' does not exist", column.Source);
                 var replaceType = input.Schema[inputCol].Type;
                 var replaceItemType = replaceType.GetItemType();
-                if (!Data.Conversion.Conversions.Instance.TryGetStandardConversion(BooleanDataViewType.Instance, replaceItemType, out Delegate conv, out bool identity))
+                if (!Data.Conversion.Conversions.DefaultInstance.TryGetStandardConversion(BooleanDataViewType.Instance, replaceItemType, out Delegate conv, out bool identity))
                 {
                     throw h.Except("Cannot concatenate indicator column of type '{0}' to input column of type '{1}'",
                         BooleanDataViewType.Instance, replaceItemType);
@@ -189,10 +188,10 @@ namespace Microsoft.ML.Transforms
 
                 // Add the NAReplaceTransform column.
                 replaceCols.Add(new MissingValueReplacingEstimator.ColumnOptions(tmpReplacementColName, column.Source,
-                    (MissingValueReplacingEstimator.ColumnOptions.ReplacementMode)(column.Kind ?? options.ReplaceWith), column.ImputeBySlot ?? options.ImputeBySlot));
+                    (MissingValueReplacingEstimator.ReplacementMode)(column.Kind ?? options.ReplaceWith), column.ImputeBySlot ?? options.ImputeBySlot));
 
                 // Add the ConcatTransform column.
-                if (replaceType is VectorType)
+                if (replaceType is VectorDataViewType)
                 {
                     concatCols.Add(new ColumnConcatenatingTransformer.TaggedColumn()
                     {

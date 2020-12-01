@@ -5,7 +5,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Runtime;
 namespace Microsoft.ML.Data
 {
@@ -306,7 +305,8 @@ namespace Microsoft.ML.Data
                 Ch.Assert(getter != null);
                 var fn = getter as ValueGetter<TValue>;
                 if (fn == null)
-                    throw Ch.Except("Invalid TValue in GetGetter: '{0}'", typeof(TValue));
+                    throw Ch.Except($"Invalid TValue in GetGetter: '{typeof(TValue)}', " +
+                            $"expected type: '{getter.GetType().GetGenericArguments().First()}'.");
                 return fn;
             }
 

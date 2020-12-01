@@ -4,7 +4,6 @@
 
 using System.Linq;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.EntryPoints;
@@ -30,7 +29,32 @@ using Microsoft.ML.Trainers.FastTree;
 
 namespace Microsoft.ML.Trainers.FastTree
 {
-    /// <include file='doc.xml' path='doc/members/member[@name="FastTree"]/*' />
+    /// <summary>
+    /// The <see cref="IEstimator{TTransformer}"/> for training a decision tree regression model using FastTree.
+    /// </summary>
+    /// <remarks>
+    /// <format type="text/markdown"><![CDATA[
+    /// To create this trainer, use [FastTree](xref:Microsoft.ML.TreeExtensions.FastTree(Microsoft.ML.RegressionCatalog.RegressionTrainers,System.String,System.String,System.String,System.Int32,System.Int32,System.Int32,System.Double))
+    /// or [FastTree(Options)](xref:Microsoft.ML.TreeExtensions.FastTree(Microsoft.ML.RegressionCatalog.RegressionTrainers,Microsoft.ML.Trainers.FastTree.FastTreeRegressionTrainer.Options)).
+    ///
+    /// [!include[io](~/../docs/samples/docs/api-reference/io-columns-regression.md)]
+    ///
+    /// ### Trainer Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Machine learning task | Regression |
+    /// | Is normalization required? | No |
+    /// | Is caching required? | No |
+    /// | Required NuGet in addition to Microsoft.ML | Microsoft.ML.FastTree |
+    /// | Exportable to ONNX | Yes |
+    ///
+    /// [!include[algorithm](~/../docs/samples/docs/api-reference/algo-details-fasttree.md)]
+    /// ]]>
+    /// </format>
+    /// </remarks>
+    /// <seealso cref="TreeExtensions.FastTree(RegressionCatalog.RegressionTrainers, string, string, string, int, int, int, double)"/>
+    /// <seealso cref="TreeExtensions.FastTree(RegressionCatalog.RegressionTrainers, FastTreeRegressionTrainer.Options)"/>
+    /// <seealso cref="Options"/>
     public sealed partial class FastTreeRegressionTrainer
         : BoostingFastTreeTrainerBase<FastTreeRegressionTrainer.Options, RegressionPredictionTransformer<FastTreeRegressionModelParameters>, FastTreeRegressionModelParameters>
     {
@@ -237,7 +261,7 @@ namespace Microsoft.ML.Trainers.FastTree
 
             if (FastTreeTrainerOptions.PrintTestGraph)
             {
-                // If FirstTestHistory is null (which means the tests were not intialized due to /tf==infinity),
+                // If FirstTestHistory is null (which means the tests were not initialized due to /tf==infinity),
                 // we need initialize first set for graph printing.
                 // Adding to a tests would result in printing the results after final iteration.
                 if (_firstTestSetHistory == null)
@@ -362,7 +386,7 @@ namespace Microsoft.ML.Trainers.FastTree
 
             // We only print non-zero train&valid graph if earlyStoppingTruncation!=0.
             // In case /es is not set, we print 0 for train and valid graph NDCG.
-            // Let's keeping this behaviour for backward compatibility with previous FR version.
+            // Let's keeping this behavior for backward compatibility with previous FR version.
             // Ideally /graphtv should enforce non-zero /es in the commandline validation.
             if (_trainRegressionTest != null)
                 trainRegression = _trainRegressionTest.ComputeTests().Last().FinalValue;
@@ -391,7 +415,7 @@ namespace Microsoft.ML.Trainers.FastTree
         {
             private readonly float[] _labels;
 
-            public ObjectiveImpl(Dataset trainData, RegressionGamTrainer.Options options) :
+            public ObjectiveImpl(Dataset trainData, GamRegressionTrainer.Options options) :
                 base(
                     trainData,
                     options.LearningRate,
@@ -445,6 +469,9 @@ namespace Microsoft.ML.Trainers.FastTree
         }
     }
 
+    /// <summary>
+    /// Model parameters for <see cref="FastForestRegressionTrainer"/>.
+    /// </summary>
     public sealed class FastTreeRegressionModelParameters : TreeEnsembleModelParametersBasedOnRegressionTree
     {
         internal const string LoaderSignature = "FastTreeRegressionExec";
@@ -487,7 +514,7 @@ namespace Microsoft.ML.Trainers.FastTree
             ctx.SetVersionInfo(GetVersionInfo());
         }
 
-        private static FastTreeRegressionModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
+        internal static FastTreeRegressionModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
         {
             Contracts.CheckValue(env, nameof(env));
             env.CheckValue(ctx, nameof(ctx));

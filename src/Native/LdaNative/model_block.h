@@ -45,7 +45,7 @@ namespace lda
         void Init(int32_t num_vocabs, int32_t num_topics, int64_t nonzero_num);
         void Init(int32_t num_vocabs, int32_t num_topics, int64_t mem_block_size, int64_t alias_mem_block_size);
 
-        void InitFromDataBlock(const LDADataBlock *data_block, int32_t num_vocabs, int32_t num_topics);
+        void InitFromDataBlock(const LDADataBlock &data_block, int32_t num_vocabs, int32_t num_topics);
 
         void GetModelStat(int64_t &mem_block_size, int64_t &alias_mem_block_size);
 
@@ -62,10 +62,10 @@ namespace lda
         int32_t num_topics_;
         WordEntry *dict_;
         int32_t *mem_block_;
-        int64_t mem_block_size_;
+        size_t mem_block_size_;
 
         int32_t *alias_mem_block_;
-        int64_t alias_mem_block_size_;
+        size_t alias_mem_block_size_;
 
         int64_t offset_;
         int64_t alias_offset_;

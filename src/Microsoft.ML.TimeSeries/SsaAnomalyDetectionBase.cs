@@ -4,7 +4,6 @@
 
 using System;
 using System.IO;
-using Microsoft.Data.DataView;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
@@ -93,7 +92,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
         bool ITransformer.IsRowToRowMapper => ((ITransformer)InternalTransform).IsRowToRowMapper;
 
         /// <summary>
-        /// Creates a clone of the transfomer. Used for taking the snapshot of the state.
+        /// Creates a clone of the transformer. Used for taking the snapshot of the state.
         /// </summary>
         /// <returns></returns>
         IStatefulTransformer IStatefulTransformer.Clone() => InternalTransform.Clone();
@@ -202,8 +201,8 @@ namespace Microsoft.ML.Transforms.TimeSeries
                 ErrorFunc = ErrorFunctionUtils.GetErrorFunction(ErrorFunction);
                 IsAdaptive = options.IsAdaptive;
                 // Creating the master SSA model
-                Model = new AdaptiveSingularSpectrumSequenceModeler(Host, options.InitialWindowSize, SeasonalWindowSize + 1, SeasonalWindowSize,
-                    DiscountFactor, AdaptiveSingularSpectrumSequenceModeler.RankSelectionMethod.Exact, null, SeasonalWindowSize / 2, false, false);
+                Model = new AdaptiveSingularSpectrumSequenceModelerInternal(Host, options.InitialWindowSize, SeasonalWindowSize + 1, SeasonalWindowSize,
+                    DiscountFactor, RankSelectionMethod.Exact, null, SeasonalWindowSize / 2, false, false);
 
                 StateRef = new State();
                 StateRef.InitState(WindowSize, InitialWindowSize, this, Host);
@@ -252,7 +251,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
 
                 var colType = inputSchema[col].Type;
                 if (colType != NumberDataViewType.Single)
-                    throw Host.ExceptSchemaMismatch(nameof(inputSchema), "input", InputColumnName, "float", colType.ToString());
+                    throw Host.ExceptSchemaMismatch(nameof(inputSchema), "input", InputColumnName, "Single", colType.ToString());
 
                 return Transform(new EmptyDataView(Host, inputSchema)).Schema;
             }
@@ -341,7 +340,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
 
                 private protected override double ComputeRawAnomalyScore(ref Single input, FixedSizeQueue<Single> windowedBuffer, long iteration)
                 {
-                    // Get the prediction for the next point opn the series
+                    // Get the prediction for the next point in the series
                     Single expectedValue = 0;
                     _model.PredictNext(ref expectedValue);
 

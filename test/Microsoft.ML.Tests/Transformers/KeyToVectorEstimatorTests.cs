@@ -3,13 +3,13 @@
 // See the LICENSE file in the project root for more information.
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Model;
 using Microsoft.ML.RunTests;
-using Microsoft.ML.StaticPipe;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Tools;
 using Microsoft.ML.Transforms;
 using Xunit;
@@ -55,7 +55,7 @@ namespace Microsoft.ML.Tests.Transformers
             dataView = new ValueToKeyMappingEstimator(Env, new[]{
                     new ValueToKeyMappingEstimator.ColumnOptions("TermA", "A"),
                     new ValueToKeyMappingEstimator.ColumnOptions("TermB", "B"),
-                    new ValueToKeyMappingEstimator.ColumnOptions("TermC", "C", textKeyValues:true)
+                    new ValueToKeyMappingEstimator.ColumnOptions("TermC", "C", addKeyValueAnnotationsAsText:true)
                 }).Fit(dataView).Transform(dataView);
 
             var pipe = ML.Transforms.Conversion.MapKeyToVector(new KeyToVectorMappingEstimator.ColumnOptions("CatA", "TermA", false),
@@ -67,34 +67,24 @@ namespace Microsoft.ML.Tests.Transformers
         }
 
         [Fact]
-        public void KeyToVectorStatic()
+        public void KeyToVector()
         {
-            string dataPath = GetDataPath("breast-cancer.txt");
-            var reader = TextLoaderStatic.CreateLoader(Env, ctx => (
-                ScalarString: ctx.LoadText(1),
-                VectorString: ctx.LoadText(1, 4)
-            ));
+            string dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
+            var data = ML.Data.LoadFromTextFile(dataPath, new[] {
+                new TextLoader.Column("ScalarString", DataKind.String, 0),
+                new TextLoader.Column("VectorString", DataKind.String, 1, 4),
+            });
 
-            var data = reader.Load(dataPath);
-
-            // Non-pigsty Term.
-            var dynamicData = new ValueToKeyMappingEstimator(Env, new[] {
+            var transformedData = new ValueToKeyMappingEstimator(Env, new[] {
                 new ValueToKeyMappingEstimator.ColumnOptions("A", "ScalarString"),
                 new ValueToKeyMappingEstimator.ColumnOptions("B", "VectorString") })
-                .Fit(data.AsDynamic).Transform(data.AsDynamic);
+                .Fit(data).Transform(data);
 
-            var data2 = dynamicData.AssertStatic(Env, ctx => (
-                A: ctx.KeyU4.TextValues.Scalar,
-                B: ctx.KeyU4.TextValues.Vector));
+            var est = ML.Transforms.Conversion.MapKeyToVector("ScalarString", "A")
+                .Append(ML.Transforms.Conversion.MapKeyToVector("VectorString", "B"))
+                .Append(ML.Transforms.Conversion.MapKeyToVector("VectorBaggedString", "B", true));
 
-            var est = data2.MakeNewEstimator()
-                .Append(row => (
-                ScalarString: row.A.ToVector(),
-                VectorString: row.B.ToVector(),
-                VectorBaggedString: row.B.ToBaggedVector()
-                ));
-
-            TestEstimatorCore(est.AsDynamic, data2.AsDynamic, invalidInput: data.AsDynamic);
+            TestEstimatorCore(est, transformedData, invalidInput: data);
 
             Done();
         }
@@ -110,14 +100,14 @@ namespace Microsoft.ML.Tests.Transformers
 
             var dataView = ML.Data.LoadFromEnumerable(data);
             var termEst = new ValueToKeyMappingEstimator(Env, new[] {
-                new ValueToKeyMappingEstimator.ColumnOptions("TA", "A", textKeyValues: true),
+                new ValueToKeyMappingEstimator.ColumnOptions("TA", "A", addKeyValueAnnotationsAsText: true),
                 new ValueToKeyMappingEstimator.ColumnOptions("TB", "B"),
-                new ValueToKeyMappingEstimator.ColumnOptions("TC", "C", textKeyValues: true),
-                new ValueToKeyMappingEstimator.ColumnOptions("TD", "D", textKeyValues: true),
+                new ValueToKeyMappingEstimator.ColumnOptions("TC", "C", addKeyValueAnnotationsAsText: true),
+                new ValueToKeyMappingEstimator.ColumnOptions("TD", "D", addKeyValueAnnotationsAsText: true),
                 new ValueToKeyMappingEstimator.ColumnOptions("TE", "E"),
                 new ValueToKeyMappingEstimator.ColumnOptions("TF", "F"),
                 new ValueToKeyMappingEstimator.ColumnOptions("TG", "G"),
-                new ValueToKeyMappingEstimator.ColumnOptions("TH", "H", textKeyValues: true) });
+                new ValueToKeyMappingEstimator.ColumnOptions("TH", "H", addKeyValueAnnotationsAsText: true) });
             var termTransformer = termEst.Fit(dataView);
             dataView = termTransformer.Transform(dataView);
 
@@ -233,6 +223,52 @@ namespace Microsoft.ML.Tests.Transformers
                 ms.Position = 0;
                 var loadedView = ModelFileUtils.LoadTransforms(Env, dataView, ms);
             }
+        }
+
+        public class ModelInput
+        {
+            [ColumnName("Label"), LoadColumn(0)]
+            public int Label { get; set; }
+
+
+            [ColumnName("ProblematicColumn"), LoadColumn(1)]
+            public string ProblematicColumn { get; set; }
+        }
+
+        static IEnumerable<ModelInput> GetData()
+        {
+            for (int i = 0; i < 1000; i++)
+            {
+                yield return new ModelInput { Label = i % 3, ProblematicColumn = (i % 200).ToString() };
+            }
+        }
+
+        [Fact]
+        public void KeyToVectorOverflowTest()
+        {
+            // This test is introduced for https://github.com/dotnet/machinelearning/issues/5211
+            // that provides users an informational exception message
+            // This exception happens if call OneHotHashEncoding twice in your pipeline
+            MLContext mlContext = new MLContext(1);
+
+            IDataView dataview = mlContext.Data.LoadFromEnumerable(GetData());
+
+            var pipeline = mlContext.Transforms.Conversion.MapValueToKey("Label")
+                   .Append(mlContext.Transforms.Categorical.OneHotHashEncoding("ProblematicColumn"));
+
+            var featurizedData = pipeline.Fit(dataview).Transform(dataview);
+
+            try
+            {
+                var transformer = pipeline.Fit(featurizedData);
+                Assert.True(false);
+            }
+            catch (System.Exception ex)
+            {
+                Assert.Contains("Arithmetic operation resulted in an overflow. Related column: ProblematicColumn", ex.Message);
+                return;
+            }
+
         }
     }
 }

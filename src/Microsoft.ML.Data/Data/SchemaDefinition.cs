@@ -6,14 +6,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
 
 namespace Microsoft.ML.Data
 {
     /// <summary>
-    /// Allow member to be marked as a <see cref="KeyType"/>.
+    /// Allow member to be marked as a <see cref="KeyDataViewType"/>.
     /// </summary>
     /// <remarks>
     /// Can be applied only for member of following types: <see cref="byte"/>, <see cref="ushort"/>, <see cref="uint"/>, <see cref="ulong"/>
@@ -22,20 +21,24 @@ namespace Microsoft.ML.Data
     public sealed class KeyTypeAttribute : Attribute
     {
         /// <summary>
-        /// Marks member as <see cref="KeyType"/>.
+        /// Marks member as <see cref="KeyDataViewType"/>.
         /// </summary>
         /// <remarks>
-        /// Cardinality of <see cref="KeyType"/> would be maximum legal value of member type.
+        /// Cardinality of <see cref="KeyDataViewType"/> would be maximum legal value of member type.
         /// </remarks>
         public KeyTypeAttribute()
         {
-
+            throw Contracts.ExceptNotSupp("Using KeyType without the Count parameter is not supported");
         }
 
         /// <summary>
-        /// Marks member as <see cref="KeyType"/> and specifies <see cref="KeyType"/> cardinality.
+        /// Marks member as <see cref="KeyDataViewType"/> and specifies <see cref="KeyDataViewType"/> cardinality.
+        /// In case of the attribute being used with int types, the <paramref name="count"/> should be set to one more than
+        /// the maximum value to account for counting starting at 1 (0 is reserved for the missing KeyType). E.g the cardinality of the
+        /// 0-9 range is 10.
+        /// If the values are outside of the specified cardinality they will be mapped to the missing value representation: 0.
         /// </summary>
-        /// <param name="count">Cardinality of <see cref="KeyType"/>.</param>
+        /// <param name="count">Cardinality of <see cref="KeyDataViewType"/>.</param>
         public KeyTypeAttribute(ulong count)
         {
             KeyCount = new KeyCount(count);
@@ -48,7 +51,7 @@ namespace Microsoft.ML.Data
     }
 
     /// <summary>
-    /// Allows a member to be marked as a <see cref="VectorType"/>, primarily allowing one to set
+    /// Allows a member to be marked as a <see cref="VectorDataViewType"/>, primarily allowing one to set
     /// the dimensionality of the resulting array.
     /// </summary>
     [AttributeUsage(AttributeTargets.Field | AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
@@ -77,7 +80,9 @@ namespace Microsoft.ML.Data
         }
 
         /// <summary>
-        /// Mark member with expected dimensions of array.
+        /// Mark member with expected dimensions of array. Notice that this attribute is expected to be added to one dimensional arrays,
+        /// and it shouldn't be added to multidimensional arrays. Internally, ML.NET will use the shape information provided as the
+        /// "dimensions" param of this constructor, to use it as a multidimensional array.
         /// </summary>
         /// <param name="dimensions">Dimensions of array. All values should be non-negative.
         /// A zero value indicates that the vector type is considered to have unknown length along that dimension.</param>
@@ -140,9 +145,9 @@ namespace Microsoft.ML.Data
         /// <param name="obj">The object that attempts to acquire the channel.</param>
         /// <param name="channel">The channel to pass to the object.</param>
         /// <param name="ectx">The exception context.</param>
-        /// <returns>1. A boolean indicator of whether the channel was sucessfully passed to the object.
+        /// <returns>1. A boolean indicator of whether the channel was successfully passed to the object.
         /// 2. The object passed in (only modified by the addition of the channel to the field
-        /// with the CursorChannelAttribute, if the channel was added sucessfully).</returns>
+        /// with the CursorChannelAttribute, if the channel was added successfully).</returns>
         public static bool TrySetCursorChannel<T>(IExceptionContext ectx, T obj, IChannel channel)
             where T : class
         {
@@ -204,15 +209,14 @@ namespace Microsoft.ML.Data
         /// </summary>
         public sealed class Column
         {
-            private readonly Dictionary<string, AnnotationInfo> _annotations;
-            internal Dictionary<string, AnnotationInfo> Annotations { get { return _annotations; } }
+            internal Dictionary<string, AnnotationInfo> AnnotationInfos { get; }
 
             /// <summary>
             /// The name of the member the column is taken from. The API
             /// requires this to not be null, and a valid name of a member of
             /// the type for which we are creating a schema.
             /// </summary>
-            public string MemberName { get; set; }
+            public string MemberName { get; }
             /// <summary>
             /// The name of the column that's created in the data view. If this
             /// is null, the API uses the <see cref="MemberName"/>.
@@ -225,60 +229,44 @@ namespace Microsoft.ML.Data
             public DataViewType ColumnType { get; set; }
 
             /// <summary>
-            /// Whether the column is a computed type.
-            /// </summary>
-            public bool IsComputed { get { return Generator != null; } }
-
-            /// <summary>
             /// The generator function. if the column is computed.
             /// </summary>
-            public Delegate Generator { get; set; }
+            internal Delegate Generator { get; set; }
 
-            public Type ReturnType => Generator?.GetMethodInfo().GetParameters().LastOrDefault().ParameterType.GetElementType();
+            internal Type ReturnType => Generator?.GetMethodInfo().GetParameters().LastOrDefault().ParameterType.GetElementType();
 
-            public Column(IExceptionContext ectx, string memberName, DataViewType columnType,
-                string columnName = null, IEnumerable<AnnotationInfo> annotationInfos = null, Delegate generator = null)
+            internal Column(string memberName, DataViewType columnType,
+                string columnName = null)
             {
-                ectx.CheckNonEmpty(memberName, nameof(memberName));
+                Contracts.CheckNonEmpty(memberName, nameof(memberName));
                 MemberName = memberName;
                 ColumnName = columnName ?? memberName;
                 ColumnType = columnType;
-                Generator = generator;
-                _annotations = annotationInfos != null ?
-                    annotationInfos.ToDictionary(m => m.Kind, m => m)
-                    : new Dictionary<string, AnnotationInfo>();
-            }
-
-            public Column()
-            {
-                _annotations = _annotations ?? new Dictionary<string, AnnotationInfo>();
+                AnnotationInfos = new Dictionary<string, AnnotationInfo>();
             }
 
             /// <summary>
             /// Add annotation to the column.
             /// </summary>
-            /// <typeparam name="T">Type of annotation being added. Types suported as entries in columns
+            /// <typeparam name="T">Type of annotation being added. Types sported as entries in columns
             /// are also supported as entries in Annotations. Multiple annotations may be added to one column.
             /// </typeparam>
             /// <param name="kind">The string identifier of the annotation.</param>
             /// <param name="value">Value of annotation.</param>
             /// <param name="annotationType">Type of value.</param>
-            public void AddAnnotation<T>(string kind, T value, DataViewType annotationType = null)
+            public void AddAnnotation<T>(string kind, T value, DataViewType annotationType)
             {
-                if (_annotations.ContainsKey(kind))
+                Contracts.CheckValue(kind, nameof(kind));
+                Contracts.CheckValue(annotationType, nameof(annotationType));
+
+                if (AnnotationInfos.ContainsKey(kind))
                     throw Contracts.Except("Column already contains an annotation of this kind.");
-                _annotations[kind] = new AnnotationInfo<T>(kind, value, annotationType);
+                AnnotationInfos[kind] = new AnnotationInfo<T>(kind, value, annotationType);
             }
 
-            /// <summary>
-            /// Remove annotation from the column if it exists.
-            /// </summary>
-            /// <param name="kind">The string identifier of the annotation.</param>
-            public void RemoveAnnotation(string kind)
+            internal void AddAnnotation(string kind, AnnotationInfo info)
             {
-                if (_annotations.ContainsKey(kind))
-                    _annotations.Remove(kind);
-                throw Contracts.Except("Column does not contain an annotation of kind: " + kind);
+                AnnotationInfos[kind] = info;
             }
 
             /// <summary>
@@ -286,13 +274,20 @@ namespace Microsoft.ML.Data
             /// </summary>
             /// <returns>A dictionary with the kind of the annotation as the key, and the
             /// annotation type as the associated value.</returns>
-            public IEnumerable<KeyValuePair<string, DataViewType>> GetAnnotationTypes
+            public DataViewSchema.Annotations Annotations
             {
                 get
                 {
-                    return Annotations.Select(x => new KeyValuePair<string, DataViewType>(x.Key, x.Value.AnnotationType));
+                    var builder = new DataViewSchema.Annotations.Builder();
+                    foreach (var kvp in AnnotationInfos)
+                        builder.Add(kvp.Key, kvp.Value.AnnotationType, kvp.Value.GetGetterDelegate());
+                    return builder.ToAnnotations();
                 }
             }
+        }
+
+        private SchemaDefinition()
+        {
         }
 
         /// <summary>
@@ -333,20 +328,11 @@ namespace Microsoft.ML.Data
             Both = Read | Write
         }
 
-        /// <summary>
-        /// Create a schema definition by enumerating all public fields of the given type.
-        /// </summary>
-        /// <param name="userType">The type to base the schema on.</param>
-        /// <param name="direction">Accept fields and properties based on their direction.</param>
-        /// <returns>The generated schema definition.</returns>
-        public static SchemaDefinition Create(Type userType, Direction direction = Direction.Both)
+        internal static MemberInfo[] GetMemberInfos(Type userType, Direction direction)
         {
             // REVIEW: This will have to be updated whenever we start
             // supporting properties and not just fields.
             Contracts.CheckValue(userType, nameof(userType));
-
-            SchemaDefinition cols = new SchemaDefinition();
-            HashSet<string> colNames = new HashSet<string>();
 
             var fieldInfos = userType.GetFields(BindingFlags.Public | BindingFlags.Instance);
             var propertyInfos =
@@ -356,83 +342,133 @@ namespace Microsoft.ML.Data
                 ((direction & Direction.Write) == Direction.Write && (x.CanWrite && x.GetSetMethod() != null))) &&
                 x.GetIndexParameters().Length == 0);
 
-            var memberInfos = (fieldInfos as IEnumerable<MemberInfo>).Concat(propertyInfos).ToArray();
+            return (fieldInfos as IEnumerable<MemberInfo>).Concat(propertyInfos).ToArray();
+        }
 
-            foreach (var memberInfo in memberInfos)
+        internal static bool NeedToCheckMemberInfo(MemberInfo memberInfo)
+        {
+            switch (memberInfo)
             {
                 // Clause to handle the field that may be used to expose the cursor channel.
                 // This field does not need a column.
                 // REVIEW: maybe validate the channel attribute now, instead
                 // of later at cursor creation.
-                switch (memberInfo)
-                {
-                    case FieldInfo fieldInfo:
-                        if (fieldInfo.FieldType == typeof(IChannel))
-                            continue;
+                case FieldInfo fieldInfo:
+                    if (fieldInfo.FieldType == typeof(IChannel))
+                        return false;
 
-                        // Const fields do not need to be mapped.
-                        if (fieldInfo.IsLiteral)
-                            continue;
+                    // Const fields do not need to be mapped.
+                    if (fieldInfo.IsLiteral)
+                        return false;
 
-                        break;
+                    break;
 
-                    case PropertyInfo propertyInfo:
-                        if (propertyInfo.PropertyType == typeof(IChannel))
-                            continue;
-                        break;
+                case PropertyInfo propertyInfo:
+                    if (propertyInfo.PropertyType == typeof(IChannel))
+                        return false;
+                    break;
 
-                    default:
-                        Contracts.Assert(false);
-                        throw Contracts.ExceptNotSupp("Expected a FieldInfo or a PropertyInfo");
-                }
+                default:
+                    Contracts.Assert(false);
+                    throw Contracts.ExceptNotSupp("Expected a FieldInfo or a PropertyInfo");
+            }
 
-                if (memberInfo.GetCustomAttribute<NoColumnAttribute>() != null)
+            if (memberInfo.GetCustomAttribute<NoColumnAttribute>() != null)
+                return false;
+
+            return true;
+        }
+
+        internal static bool GetNameAndCustomAttributes(MemberInfo memberInfo, Type userType, HashSet<string> colNames, out string name, out IEnumerable<Attribute> customAttributes)
+        {
+            name = null;
+            customAttributes = null;
+
+            if (!NeedToCheckMemberInfo(memberInfo))
+                return false;
+
+            customAttributes = memberInfo.GetCustomAttributes();
+            var customTypeAttributes = customAttributes.Where(x => x is DataViewTypeAttribute);
+            if (customTypeAttributes.Count() > 1)
+                throw Contracts.ExceptParam(nameof(userType), "Member {0} cannot be marked with multiple attributes, {1}, derived from {2}.",
+                    memberInfo.Name, customTypeAttributes, typeof(DataViewTypeAttribute));
+            else if (customTypeAttributes.Count() == 1)
+            {
+                var customTypeAttribute = (DataViewTypeAttribute)customTypeAttributes.First();
+                customTypeAttribute.Register();
+            }
+
+            var mappingNameAttr = memberInfo.GetCustomAttribute<ColumnNameAttribute>();
+            name = mappingNameAttr?.Name ?? memberInfo.Name;
+            // Disallow duplicate names, because the field enumeration order is not actually
+            // well defined, so we are not guaranteed to have consistent "hiding" from run to
+            // run, across different .NET versions.
+            if (!colNames.Add(name))
+                throw Contracts.ExceptParam(nameof(userType), "Duplicate column name '{0}' detected, this is disallowed", name);
+
+            return true;
+        }
+
+        /// <summary>
+        /// Create a schema definition by enumerating all public fields of the given type.
+        /// </summary>
+        /// <param name="userType">The type to base the schema on.</param>
+        /// <param name="direction">Accept fields and properties based on their direction.</param>
+        /// <returns>The generated schema definition.</returns>
+        public static SchemaDefinition Create(Type userType, Direction direction = Direction.Both)
+        {
+            var memberInfos = GetMemberInfos(userType, direction);
+
+            SchemaDefinition cols = new SchemaDefinition();
+            HashSet<string> colNames = new HashSet<string>();
+
+            foreach (var memberInfo in memberInfos)
+            {
+                if (!GetNameAndCustomAttributes(memberInfo, userType, colNames, out string name, out IEnumerable<Attribute> customAttributes))
                     continue;
-
-                var mappingNameAttr = memberInfo.GetCustomAttribute<ColumnNameAttribute>();
-                string name = mappingNameAttr?.Name ?? memberInfo.Name;
-                // Disallow duplicate names, because the field enumeration order is not actually
-                // well defined, so we are not gauranteed to have consistent "hiding" from run to
-                // run, across different .NET versions.
-                if (!colNames.Add(name))
-                    throw Contracts.ExceptParam(nameof(userType), "Duplicate column name '{0}' detected, this is disallowed", name);
 
                 InternalSchemaDefinition.GetVectorAndItemType(memberInfo, out bool isVector, out Type dataType);
 
-                PrimitiveDataViewType itemType;
-                var keyAttr = memberInfo.GetCustomAttribute<KeyTypeAttribute>();
-                if (keyAttr != null)
-                {
-                    if (!KeyType.IsValidDataType(dataType))
-                        throw Contracts.ExceptParam(nameof(userType), "Member {0} marked with KeyType attribute, but does not appear to be a valid kind of data for a key type", memberInfo.Name);
-                    if (keyAttr.KeyCount == null)
-                        itemType = new KeyType(dataType, dataType.ToMaxInt());
-                    else
-                        itemType = new KeyType(dataType, keyAttr.KeyCount.Count.GetValueOrDefault());
-                }
-                else
-                    itemType = ColumnTypeExtensions.PrimitiveTypeFromType(dataType);
-
                 // Get the column type.
                 DataViewType columnType;
-                var vectorAttr = memberInfo.GetCustomAttribute<VectorTypeAttribute>();
-                if (vectorAttr != null && !isVector)
-                    throw Contracts.ExceptParam(nameof(userType), $"Member {memberInfo.Name} marked with {nameof(VectorTypeAttribute)}, but does not appear to be a vector type", memberInfo.Name);
-                if (isVector)
+                if (!DataViewTypeManager.Knows(dataType, customAttributes))
                 {
-                    int[] dims = vectorAttr?.Dims;
-                    if (dims != null && dims.Any(d => d < 0))
-                        throw Contracts.ExceptParam(nameof(userType), "Some of member {0}'s dimension lengths are negative");
-                    if (Utils.Size(dims) == 0)
-                        columnType = new VectorType(itemType, 0);
+                    PrimitiveDataViewType itemType;
+                    var keyAttr = memberInfo.GetCustomAttribute<KeyTypeAttribute>();
+                    if (keyAttr != null)
+                    {
+                        if (!KeyDataViewType.IsValidDataType(dataType))
+                            throw Contracts.ExceptParam(nameof(userType), "Member {0} marked with KeyType attribute, but does not appear to be a valid kind of data for a key type", memberInfo.Name);
+                        if (keyAttr.KeyCount == null)
+                            itemType = new KeyDataViewType(dataType, dataType.ToMaxInt());
+                        else
+                            itemType = new KeyDataViewType(dataType, keyAttr.KeyCount.Count.GetValueOrDefault());
+                    }
                     else
-                        columnType = new VectorType(itemType, dims);
+                        itemType = ColumnTypeExtensions.PrimitiveTypeFromType(dataType);
+
+                    var vectorAttr = memberInfo.GetCustomAttribute<VectorTypeAttribute>();
+                    if (vectorAttr != null && !isVector)
+                        throw Contracts.ExceptParam(nameof(userType), $"Member {memberInfo.Name} marked with {nameof(VectorTypeAttribute)}, but does not appear to be a vector type", memberInfo.Name);
+                    if (isVector)
+                    {
+                        int[] dims = vectorAttr?.Dims;
+                        if (dims != null && dims.Any(d => d < 0))
+                            throw Contracts.ExceptParam(nameof(userType), "Some of member {0}'s dimension lengths are negative");
+                        if (Utils.Size(dims) == 0)
+                            columnType = new VectorDataViewType(itemType, 0);
+                        else
+                            columnType = new VectorDataViewType(itemType, dims);
+                    }
+                    else
+                        columnType = itemType;
                 }
                 else
-                    columnType = itemType;
+                    columnType = DataViewTypeManager.GetDataViewType(dataType, customAttributes);
 
-                cols.Add(new Column() { MemberName = memberInfo.Name, ColumnName = name, ColumnType = columnType });
+                cols.Add(new Column(memberInfo.Name, columnType, name));
             }
+
             return cols;
         }
     }

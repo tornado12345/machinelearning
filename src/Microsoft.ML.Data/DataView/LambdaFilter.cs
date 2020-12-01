@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data.Conversion;
 using Microsoft.ML.Runtime;
 
@@ -48,7 +47,7 @@ namespace Microsoft.ML.Data
                 ident = true;
                 conv = null;
             }
-            else if (!Conversions.Instance.TryGetStandardConversion(typeOrig, typeSrc, out conv, out ident))
+            else if (!Conversions.DefaultInstance.TryGetStandardConversion(typeOrig, typeSrc, out conv, out ident))
             {
                 throw env.ExceptParam(nameof(predicate),
                     "The type of column '{0}', '{1}', cannot be converted to the input type of the predicate '{2}'",

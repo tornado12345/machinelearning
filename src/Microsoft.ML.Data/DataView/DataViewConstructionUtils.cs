@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Model;
 using Microsoft.ML.Runtime;
@@ -20,6 +19,9 @@ namespace Microsoft.ML.Data
     [BestFriend]
     internal static class DataViewConstructionUtils
     {
+        private static readonly FuncStaticMethodInfo1<string, DataViewSchema.Annotations, AnnotationInfo> _getAnnotationInfoMethodInfo
+            = new FuncStaticMethodInfo1<string, DataViewSchema.Annotations, AnnotationInfo>(GetAnnotationInfo<int>);
+
         public static IDataView CreateFromList<TRow>(IHostEnvironment env, IList<TRow> data,
             SchemaDefinition schemaDefinition = null)
             where TRow : class
@@ -44,6 +46,64 @@ namespace Microsoft.ML.Data
                 ? InternalSchemaDefinition.Create(typeof(TRow), SchemaDefinition.Direction.Read)
                 : InternalSchemaDefinition.Create(typeof(TRow), schemaDefinition);
             return new StreamingDataView<TRow>(env, data, internalSchemaDefn);
+        }
+
+        public static StreamingDataView<TRow> CreateFromEnumerable<TRow>(IHostEnvironment env, IEnumerable<TRow> data,
+            DataViewSchema schema)
+            where TRow : class
+        {
+            Contracts.AssertValue(env);
+            env.AssertValue(data);
+            env.AssertValueOrNull(schema);
+            schema = schema ?? new DataViewSchema.Builder().ToSchema();
+            return new StreamingDataView<TRow>(env, data, GetInternalSchemaDefinition<TRow>(env, schema));
+        }
+
+        internal static SchemaDefinition GetSchemaDefinition<TRow>(IHostEnvironment env, DataViewSchema schema)
+        {
+            Contracts.AssertValue(env);
+            env.AssertValue(schema);
+
+            var schemaDefinition = SchemaDefinition.Create(typeof(TRow), SchemaDefinition.Direction.Read);
+            foreach (var col in schema)
+            {
+                var name = col.Name;
+                var schemaDefinitionCol = schemaDefinition.FirstOrDefault(c => c.ColumnName == name);
+                if (schemaDefinitionCol == null)
+                    throw env.Except($"Type should contain a member named {name}");
+
+                //Always use column type from model as this type can be more specific.
+                //This can be corner case:
+                //For example, we can load an model whose schema contains Vector<Single, 38>
+                //and define this field in input class as float[] without specific array length.
+                schemaDefinitionCol.ColumnType = col.Type;
+
+                var annotations = col.Annotations;
+                if (annotations != null)
+                {
+                    foreach (var annotation in annotations.Schema)
+                    {
+                        var info = Utils.MarshalInvoke(_getAnnotationInfoMethodInfo, annotation.Type.RawType, annotation.Name, annotations);
+                        schemaDefinitionCol.AddAnnotation(annotation.Name , info);
+                    }
+                }
+            }
+            return schemaDefinition;
+        }
+
+        private static InternalSchemaDefinition GetInternalSchemaDefinition<TRow>(IHostEnvironment env, DataViewSchema schema)
+            where TRow : class
+        {
+            Contracts.AssertValue(env);
+            env.AssertValue(schema);
+            return InternalSchemaDefinition.Create(typeof(TRow), GetSchemaDefinition<TRow>(env, schema));
+        }
+
+        private static AnnotationInfo GetAnnotationInfo<T>(string kind, DataViewSchema.Annotations annotations)
+        {
+            T value = default;
+            annotations.GetValue(kind, ref value);
+            return new AnnotationInfo<T>(kind, value, annotations.Schema[kind].Type);
         }
 
         public static InputRow<TRow> CreateInputRow<TRow>(IHostEnvironment env, SchemaDefinition schemaDefinition = null)
@@ -132,6 +192,18 @@ namespace Microsoft.ML.Data
         public abstract class InputRowBase<TRow> : DataViewRow
             where TRow : class
         {
+            private static readonly FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, Delegate> _createDirectArrayGetterDelegateMethodInfo
+                = FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, Delegate>.Create(target => target.CreateDirectArrayGetterDelegate<int>);
+
+            private static readonly FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, Delegate> _createDirectVBufferGetterDelegateMethodInfo
+                = FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, Delegate>.Create(target => target.CreateDirectVBufferGetterDelegate<int>);
+
+            private static readonly FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, Delegate> _createDirectGetterDelegateMethodInfo
+                = FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, Delegate>.Create(target => target.CreateDirectGetterDelegate<int>);
+
+            private static readonly FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, DataViewType, Delegate> _createKeyGetterDelegateMethodInfo
+                = FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, DataViewType, Delegate>.Create(target => target.CreateKeyGetterDelegate<int>);
+
             private readonly int _colCount;
             private readonly Delegate[] _getters;
             protected readonly IHost Host;
@@ -163,11 +235,11 @@ namespace Microsoft.ML.Data
             {
                 var outputType = column.OutputType;
                 var genericType = outputType;
-                Func<Delegate, Delegate> del;
+                FuncInstanceMethodInfo1<InputRowBase<TRow>, Delegate, Delegate> del;
 
                 if (outputType.IsArray)
                 {
-                    VectorType vectorType = colType as VectorType;
+                    VectorDataViewType vectorType = colType as VectorDataViewType;
                     Host.Assert(vectorType != null);
 
                     // String[] -> ReadOnlyMemory<char>
@@ -182,17 +254,17 @@ namespace Microsoft.ML.Data
                         Host.Assert(Nullable.GetUnderlyingType(outputType.GetElementType()) == vectorType.ItemType.RawType);
                     else
                         Host.Assert(outputType.GetElementType() == vectorType.ItemType.RawType);
-                    del = CreateDirectArrayGetterDelegate<int>;
+                    del = _createDirectArrayGetterDelegateMethodInfo;
                     genericType = outputType.GetElementType();
                 }
-                else if (colType is VectorType vectorType)
+                else if (colType is VectorDataViewType vectorType)
                 {
                     // VBuffer<T> -> VBuffer<T>
-                    // REVIEW: Do we care about accomodating VBuffer<string> -> ReadOnlyMemory<char>?
+                    // REVIEW: Do we care about accommodating VBuffer<string> -> ReadOnlyMemory<char>?
                     Host.Assert(outputType.IsGenericType);
                     Host.Assert(outputType.GetGenericTypeDefinition() == typeof(VBuffer<>));
                     Host.Assert(outputType.GetGenericArguments()[0] == vectorType.ItemType.RawType);
-                    del = CreateDirectVBufferGetterDelegate<int>;
+                    del = _createDirectVBufferGetterDelegateMethodInfo;
                     genericType = vectorType.ItemType.RawType;
                 }
                 else if (colType is PrimitiveDataViewType)
@@ -210,21 +282,24 @@ namespace Microsoft.ML.Data
                     else
                         Host.Assert(colType.RawType == outputType);
 
-                    if (!(colType is KeyType keyType))
-                        del = CreateDirectGetterDelegate<int>;
+                    if (!(colType is KeyDataViewType keyType))
+                        del = _createDirectGetterDelegateMethodInfo;
                     else
                     {
                         var keyRawType = colType.RawType;
-                        Func<Delegate, DataViewType, Delegate> delForKey = CreateKeyGetterDelegate<uint>;
-                        return Utils.MarshalInvoke(delForKey, keyRawType, peek, colType);
+                        return Utils.MarshalInvoke(_createKeyGetterDelegateMethodInfo, this, keyRawType, peek, colType);
                     }
+                }
+                else if (DataViewTypeManager.Knows(colType))
+                {
+                    del = _createDirectGetterDelegateMethodInfo;
                 }
                 else
                 {
                     // REVIEW: Is this even possible?
                     throw Host.ExceptNotSupp("Type '{0}' is not yet supported.", outputType.FullName);
                 }
-                return Utils.MarshalInvoke(del, genericType, peek);
+                return Utils.MarshalInvoke(del, this, genericType, peek);
             }
 
             // REVIEW: The converting getter invokes a type conversion delegate on every call, so it's inherently slower
@@ -300,7 +375,7 @@ namespace Microsoft.ML.Data
             private Delegate CreateKeyGetterDelegate<TDst>(Delegate peekDel, DataViewType colType)
             {
                 // Make sure the function is dealing with key.
-                KeyType keyType = colType as KeyType;
+                KeyDataViewType keyType = colType as KeyDataViewType;
                 Host.Check(keyType != null);
                 // Following equations work only with unsigned integers.
                 Host.Check(typeof(TDst) == typeof(ulong) || typeof(TDst) == typeof(uint) ||
@@ -359,7 +434,8 @@ namespace Microsoft.ML.Data
                 Contracts.AssertValue(getter);
                 var fn = getter as ValueGetter<TValue>;
                 if (fn == null)
-                    throw Host.Except("Invalid TValue in GetGetter for column #{0}: '{1}'", column, typeof(TValue));
+                    throw Host.Except($"Invalid TValue in GetGetter for column #{column}: '{typeof(TValue)}', " +
+                        $"expected type: '{getter.GetType().GetGenericArguments().First()}'.");
                 return fn;
             }
         }
@@ -627,7 +703,7 @@ namespace Microsoft.ML.Data
             public override DataViewRowCursor GetRowCursor(IEnumerable<DataViewSchema.Column> columnsNeeded, Random rand = null)
             {
                 var predicate = RowCursorUtils.FromColumnsToPredicate(columnsNeeded, Schema);
-                return new WrappedCursor (new Cursor(Host, this, predicate));
+                return new WrappedCursor(new Cursor(Host, this, predicate));
             }
 
             private sealed class Cursor : DataViewCursorBase
@@ -697,7 +773,7 @@ namespace Microsoft.ML.Data
             {
                 Contracts.Assert(_current != null, "The current object must be set prior to cursoring");
                 var predicate = RowCursorUtils.FromColumnsToPredicate(columnsNeeded, Schema);
-                return new WrappedCursor (new Cursor(Host, this, predicate));
+                return new WrappedCursor(new Cursor(Host, this, predicate));
             }
 
             private sealed class Cursor : DataViewCursorBase
@@ -747,7 +823,7 @@ namespace Microsoft.ML.Data
     /// <summary>
     /// A single instance of annotation information, associated with a column.
     /// </summary>
-    public abstract partial class AnnotationInfo
+    internal abstract partial class AnnotationInfo
     {
         /// <summary>
         /// The type of the annotation.
@@ -776,8 +852,17 @@ namespace Microsoft.ML.Data
     /// Strongly-typed version of <see cref="AnnotationInfo"/>, that contains the actual value of the annotation.
     /// </summary>
     /// <typeparam name="T">Type of the annotation value.</typeparam>
-    public sealed class AnnotationInfo<T> : AnnotationInfo
+    internal sealed class AnnotationInfo<T> : AnnotationInfo
     {
+        private static readonly FuncInstanceMethodInfo1<AnnotationInfo<T>, Delegate> _getArrayGetterMethodInfo
+            = FuncInstanceMethodInfo1<AnnotationInfo<T>, Delegate>.Create(target => target.GetArrayGetter<int>);
+
+        private static readonly FuncInstanceMethodInfo1<AnnotationInfo<T>, Delegate> _getGetterCoreMethodInfo
+            = FuncInstanceMethodInfo1<AnnotationInfo<T>, Delegate>.Create(target => target.GetGetterCore<int>);
+
+        private static readonly FuncInstanceMethodInfo1<AnnotationInfo<T>, Delegate> _getVBufferGetterMethodInfo
+            = FuncInstanceMethodInfo1<AnnotationInfo<T>, Delegate>.Create(target => target.GetVBufferGetter<int>);
+
         public readonly T Value;
 
         /// <summary>
@@ -793,18 +878,18 @@ namespace Microsoft.ML.Data
             Contracts.Assert(value != null);
             bool isVector;
             Type itemType;
-            InternalSchemaDefinition.GetVectorAndItemType(typeof(T), "annotation value", out isVector, out itemType);
+            InternalSchemaDefinition.GetVectorAndItemType("annotation value", typeof(T), null, out isVector, out itemType);
 
             if (annotationType == null)
             {
                 // Infer a type as best we can.
                 var primitiveItemType = ColumnTypeExtensions.PrimitiveTypeFromType(itemType);
-                annotationType = isVector ? new VectorType(primitiveItemType) : (DataViewType)primitiveItemType;
+                annotationType = isVector ? new VectorDataViewType(primitiveItemType) : (DataViewType)primitiveItemType;
             }
             else
             {
                 // Make sure that the types are compatible with the declared type, including whether it is a vector type.
-                VectorType annotationVectorType = annotationType as VectorType;
+                VectorDataViewType annotationVectorType = annotationType as VectorDataViewType;
                 bool annotationIsVector = annotationVectorType != null;
                 if (isVector != annotationIsVector)
                 {
@@ -829,7 +914,7 @@ namespace Microsoft.ML.Data
             var typeT = typeof(T);
             if (typeT.IsArray)
             {
-                Contracts.Assert(AnnotationType is VectorType);
+                Contracts.Assert(AnnotationType is VectorDataViewType);
                 Contracts.Check(typeof(TDst).IsGenericType && typeof(TDst).GetGenericTypeDefinition() == typeof(VBuffer<>));
                 var itemType = typeT.GetElementType();
                 var dstItemType = typeof(TDst).GetGenericArguments()[0];
@@ -846,12 +931,9 @@ namespace Microsoft.ML.Data
                 // T[] -> VBuffer<T>
                 Contracts.Check(itemType == dstItemType);
 
-                Func<ValueGetter<VBuffer<int>>> srcMethod = GetArrayGetter<int>;
-
-                return srcMethod.GetMethodInfo().GetGenericMethodDefinition().MakeGenericMethod(dstItemType)
-                    .Invoke(this, new object[] { }) as ValueGetter<TDst>;
+                return Utils.MarshalInvoke(_getArrayGetterMethodInfo, this, dstItemType) as ValueGetter<TDst>;
             }
-            if (AnnotationType is VectorType annotationVectorType)
+            if (AnnotationType is VectorDataViewType annotationVectorType)
             {
                 // VBuffer<T> -> VBuffer<T>
                 // REVIEW: Do we care about accomodating VBuffer<string> -> VBuffer<ReadOnlyMemory<char>>?
@@ -865,10 +947,7 @@ namespace Microsoft.ML.Data
                 Contracts.Assert(itemType == annotationVectorType.ItemType.RawType);
                 Contracts.Check(itemType == dstItemType);
 
-                Func<ValueGetter<VBuffer<int>>> srcMethod = GetVBufferGetter<int>;
-                return srcMethod.GetMethodInfo().GetGenericMethodDefinition()
-                    .MakeGenericMethod(annotationVectorType.ItemType.RawType)
-                    .Invoke(this, new object[] { }) as ValueGetter<TDst>;
+                return Utils.MarshalInvoke(_getVBufferGetterMethodInfo, this, annotationVectorType.ItemType.RawType) as ValueGetter<TDst>;
             }
             if (AnnotationType is PrimitiveDataViewType)
             {
@@ -894,7 +973,7 @@ namespace Microsoft.ML.Data
 
         internal override Delegate GetGetterDelegate()
         {
-            return Utils.MarshalInvoke(GetGetterCore<int>, AnnotationType.RawType);
+            return Utils.MarshalInvoke(_getGetterCoreMethodInfo, this, AnnotationType.RawType);
         }
 
         private void GetStringArray(ref VBuffer<ReadOnlyMemory<char>> dst)

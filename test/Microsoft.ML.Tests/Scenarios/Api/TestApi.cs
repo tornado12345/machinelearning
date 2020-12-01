@@ -6,12 +6,12 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Data.IO;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.TestFramework;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Trainers;
 using Microsoft.ML.Transforms;
 using Xunit;
@@ -21,7 +21,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api
 {
     public partial class TestApi : BaseTestClass
     {
-        private const string OutputRelativePath = @"..\Common\Api";
+        private const string OutputRelativePath = @"../Common/Api";
 
         public TestApi(ITestOutputHelper output) : base(output)
         {
@@ -171,13 +171,13 @@ namespace Microsoft.ML.Tests.Scenarios.Api
         public void TrainAveragedPerceptronWithCache()
         {
             var mlContext = new MLContext(0);
-            var dataFile = GetDataPath("breast-cancer.txt");
+            var dataFile = GetDataPath(TestDatasets.breastCancer.trainFilename);
             var loader = TextLoader.Create(mlContext, new TextLoader.Options(), new MultiFileSource(dataFile));
             var globalCounter = 0;
-            var xf = LambdaTransform.CreateFilter<object, object>(mlContext, loader,
+            IDataView xf = LambdaTransform.CreateFilter<object, object>(mlContext, loader,
                 (i, s) => true,
                 s => { globalCounter++; });
-
+            xf = mlContext.Transforms.Conversion.ConvertType("Label", outputKind: DataKind.Boolean).Fit(xf).Transform(xf);
             // The baseline result of this was generated with everything cached in memory. As auto-cache is removed,
             // an explicit step of caching is required to make this test ok.
             var cached = mlContext.Data.Cache(xf);
@@ -201,32 +201,32 @@ namespace Microsoft.ML.Tests.Scenarios.Api
 
             // Create Metadata.
             var kindFloat = "Testing float as metadata.";
-            var valueFloat = 10;
+            float valueFloat = 10;
             var coltypeFloat = NumberDataViewType.Single;
             var kindString = "Testing string as metadata.";
             var valueString = "Strings have value.";
+            var coltypeString = TextDataViewType.Instance;
             var kindStringArray = "Testing string array as metadata.";
             var valueStringArray = "I really have no idea what these features entail.".Split(' ');
+            var coltypeStringArray = new VectorDataViewType(coltypeString, valueStringArray.Length);
             var kindFloatArray = "Testing float array as metadata.";
             var valueFloatArray = new float[] { 1, 17, 7, 19, 25, 0 };
+            var coltypeFloatArray = new VectorDataViewType(coltypeFloat, valueFloatArray.Length);
             var kindVBuffer = "Testing VBuffer as metadata.";
             var valueVBuffer = new VBuffer<float>(4, new float[] { 4, 6, 89, 5 });
-
-            var metaFloat = new AnnotationInfo<float>(kindFloat, valueFloat, coltypeFloat);
-            var metaString = new AnnotationInfo<string>(kindString, valueString);
+            var coltypeVBuffer = new VectorDataViewType(coltypeFloat, valueVBuffer.Length);
 
             // Add Metadata.
             var labelColumn = autoSchema[0];
-            var labelColumnWithMetadata = new SchemaDefinition.Column(mlContext, labelColumn.MemberName, labelColumn.ColumnType,
-                annotationInfos: new AnnotationInfo[] { metaFloat, metaString });
+            labelColumn.AddAnnotation(kindFloat, valueFloat, coltypeFloat);
+            labelColumn.AddAnnotation(kindString, valueString, coltypeString);
 
-            var featureColumnWithMetadata = autoSchema[1];
-            featureColumnWithMetadata.AddAnnotation(kindStringArray, valueStringArray);
-            featureColumnWithMetadata.AddAnnotation(kindFloatArray, valueFloatArray);
-            featureColumnWithMetadata.AddAnnotation(kindVBuffer, valueVBuffer);
+            var featureColumn = autoSchema[1];
+            featureColumn.AddAnnotation(kindStringArray, valueStringArray, coltypeStringArray);
+            featureColumn.AddAnnotation(kindFloatArray, valueFloatArray, coltypeFloatArray);
+            featureColumn.AddAnnotation(kindVBuffer, valueVBuffer, coltypeVBuffer);
 
-            var mySchema = new SchemaDefinition { labelColumnWithMetadata, featureColumnWithMetadata };
-            var idv = mlContext.Data.LoadFromEnumerable(data, mySchema);
+            var idv = mlContext.Data.LoadFromEnumerable(data, autoSchema);
 
             Assert.True(idv.Schema[0].Annotations.Schema.Count == 2);
             Assert.True(idv.Schema[0].Annotations.Schema[0].Name == kindFloat);
@@ -236,7 +236,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api
 
             Assert.True(idv.Schema[1].Annotations.Schema.Count == 3);
             Assert.True(idv.Schema[1].Annotations.Schema[0].Name == kindStringArray);
-            Assert.True(idv.Schema[1].Annotations.Schema[0].Type is VectorType vectorType && vectorType.ItemType is TextDataViewType);
+            Assert.True(idv.Schema[1].Annotations.Schema[0].Type is VectorDataViewType vectorType && vectorType.ItemType is TextDataViewType);
             Assert.Throws<ArgumentOutOfRangeException>(() => idv.Schema[1].Annotations.Schema[kindFloat]);
 
             float retrievedFloat = 0;
@@ -265,7 +265,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api
 
         private List<BreastCancerExample> ReadBreastCancerExamples()
         {
-            var dataFile = GetDataPath("breast-cancer.txt");
+            var dataFile = GetDataPath(TestDatasets.breastCancer.trainFilename);
 
             // read the data programmatically into memory
             var data = File.ReadAllLines(dataFile)
@@ -292,10 +292,58 @@ namespace Microsoft.ML.Tests.Scenarios.Api
         }
 
         [Fact]
+        public void TestSplitsSchema()
+        {
+
+            var mlContext = new MLContext(0);
+            var dataPath = GetDataPath("adult.tiny.with-schema.txt");
+
+            var fullInput = mlContext.Data.LoadFromTextFile(dataPath, new[] {
+                            new TextLoader.Column("Label", DataKind.Boolean, 0),
+                            new TextLoader.Column("Workclass", DataKind.String, 1),
+                            new TextLoader.Column("Education", DataKind.String,2),
+                            new TextLoader.Column("Age", DataKind.Single,9)
+            }, hasHeader: true);
+
+            var ttSplit = mlContext.Data.TrainTestSplit(fullInput);
+            var ttSplitWithSeed = mlContext.Data.TrainTestSplit(fullInput, seed: 10);
+            var ttSplitWithSeedAndSamplingKey = mlContext.Data.TrainTestSplit(fullInput, seed: 10, samplingKeyColumnName: "Workclass");
+
+            var cvSplit = mlContext.Data.CrossValidationSplit(fullInput);
+            var cvSplitWithSeed = mlContext.Data.CrossValidationSplit(fullInput, seed: 10);
+            var cvSplitWithSeedAndSamplingKey = mlContext.Data.CrossValidationSplit(fullInput, seed: 10, samplingKeyColumnName: "Workclass");
+
+            var splits = new[]
+            {
+                ttSplit.TrainSet,
+                ttSplit.TestSet,
+                ttSplitWithSeed.TrainSet,
+                ttSplitWithSeed.TestSet,
+                ttSplitWithSeedAndSamplingKey.TrainSet,
+                ttSplitWithSeedAndSamplingKey.TestSet,
+                cvSplit.First().TrainSet,
+                cvSplit.First().TestSet,
+                cvSplitWithSeed.First().TrainSet,
+                cvSplitWithSeed.First().TestSet,
+                cvSplitWithSeedAndSamplingKey.First().TrainSet,
+                cvSplitWithSeedAndSamplingKey.First().TestSet
+            };
+
+            // Splitting a dataset shouldn't affect its schema
+            foreach(var split in splits)
+            {
+                Assert.Equal(fullInput.Schema.Count, split.Schema.Count);
+                foreach(var col in fullInput.Schema)
+                {
+                    Assert.Equal(col.Name, split.Schema[col.Index].Name);
+                }
+            }
+        }
+
+        [Fact]
         public void TestTrainTestSplit()
         {
             var mlContext = new MLContext(0);
-            
             var dataPath = GetDataPath("adult.tiny.with-schema.txt");
             // Create the reader: define the data columns and where to find them in the text file.
             var input = mlContext.Data.LoadFromTextFile(dataPath, new[] {
@@ -313,8 +361,8 @@ namespace Microsoft.ML.Tests.Scenarios.Api
             // Let's test what train test properly works with seed.
             // In order to do that, let's split same dataset, but in one case we will use default seed value,
             // and in other case we set seed to be specific value.
-            var simpleSplit = mlContext.BinaryClassification.TrainTestSplit(input);
-            var splitWithSeed = mlContext.BinaryClassification.TrainTestSplit(input, seed: 10);
+            var simpleSplit = mlContext.Data.TrainTestSplit(input);
+            var splitWithSeed = mlContext.Data.TrainTestSplit(input, seed: 10);
 
             // Since test fraction is 0.1, it's much faster to compare test subsets of split.
             var simpleTestWorkClass = getWorkclass(simpleSplit.TestSet);
@@ -326,7 +374,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api
             // Now let's do same thing but with presence of stratificationColumn.
             // Rows with same values in this stratificationColumn should end up in same subset (train or test).
             // So let's break dataset by "Workclass" column.
-            var stratSplit = mlContext.BinaryClassification.TrainTestSplit(input, samplingKeyColumn: "Workclass");
+            var stratSplit = mlContext.Data.TrainTestSplit(input, samplingKeyColumnName: "Workclass");
             var stratTrainWorkclass = getWorkclass(stratSplit.TrainSet);
             var stratTestWorkClass = getWorkclass(stratSplit.TestSet);
             // Let's get unique values for "Workclass" column from train subset.
@@ -338,7 +386,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api
 
             // Let's do same thing, but this time we will choose different seed.
             // Stratification column should still break dataset properly without same values in both subsets.
-            var stratSeed = mlContext.BinaryClassification.TrainTestSplit(input, samplingKeyColumn:"Workclass", seed: 1000000);
+            var stratSeed = mlContext.Data.TrainTestSplit(input, samplingKeyColumnName: "Workclass", seed: 1000000);
             var stratTrainWithSeedWorkclass = getWorkclass(stratSeed.TrainSet);
             var stratTestWithSeedWorkClass = getWorkclass(stratSeed.TestSet);
             // Let's get unique values for "Workclass" column from train subset.
@@ -350,8 +398,115 @@ namespace Microsoft.ML.Tests.Scenarios.Api
             Assert.True(Enumerable.Intersect(uniqueSeedTrain, uniqueSeedTest).Count() == 0);
             // Validate we got different test results on same stratification column with different seeds
             Assert.NotEqual(uniqueTest, uniqueSeedTest);
-
         }
 
+        private sealed class Input
+        {
+            public int Id { get; set; }
+            public string TextStrat { get; set; }
+            public float FloatStrat { get; set; }
+            [VectorType(4)]
+            public float[] VectorStrat { get; set; }
+            public DateTime DateTimeStrat { get; set; }
+            public DateTimeOffset DateTimeOffsetStrat { get; set; }
+            public TimeSpan TimeSpanStrat { get; set; }
+        }
+
+        [Fact]
+        public void TestSplitsWithSamplingKeyColumn()
+        {
+            var mlContext = new MLContext(0);
+            var input = mlContext.Data.LoadFromEnumerable(new[]
+            {
+                new Input() {
+                    Id = 0, TextStrat = "a", FloatStrat = 3, VectorStrat = new float[]{ 2, 3, 4, 5 }, DateTimeStrat = new DateTime(2002, 2, 23),
+                    DateTimeOffsetStrat = new DateTimeOffset(2002, 2, 23, 3, 30, 0, new TimeSpan(1, 0, 0)), TimeSpanStrat = new TimeSpan(2, 0, 0)
+                },
+                new Input() {
+                    Id = 1, TextStrat = "b", FloatStrat = 3, VectorStrat = new float[]{ 1, 2, 3, 4 }, DateTimeStrat = new DateTime(2020, 2, 23),
+                    DateTimeOffsetStrat = new DateTimeOffset(2002, 2, 23, 3, 30, 0, new TimeSpan(2, 0, 0)), TimeSpanStrat = new TimeSpan(2, 0, 10)
+                },
+                new Input() {
+                    Id = 2, TextStrat = "c", FloatStrat = 4, VectorStrat = new float[]{ 3, 4, 5, 6 }, DateTimeStrat = new DateTime(2018, 2, 23),
+                    DateTimeOffsetStrat = new DateTimeOffset(2002, 2, 23, 3, 30, 0, new TimeSpan(1, 0, 0)), TimeSpanStrat = new TimeSpan(2, 0, 10)
+                },
+                new Input() {
+                    Id = 3, TextStrat = "d", FloatStrat = 4, VectorStrat = new float[]{ 4, 5, 6, 7 }, DateTimeStrat = new DateTime(2016, 2, 23),
+                    DateTimeOffsetStrat = new DateTimeOffset(2002, 2, 23, 3, 30, 0, new TimeSpan(2, 0, 0)), TimeSpanStrat = new TimeSpan(2, 0, 0)
+                },
+                new Input() {
+                    Id = 4, TextStrat = "a", FloatStrat = -493.28f, VectorStrat = new float[]{ 2, 3, 4, 5 }, DateTimeStrat = new DateTime(2016, 2, 23),
+                    DateTimeOffsetStrat = new DateTimeOffset(2002, 2, 23, 3, 30, 0, new TimeSpan(3, 0, 0)), TimeSpanStrat = new TimeSpan(2, 0, 20)
+                },
+                new Input() {
+                    Id = 5, TextStrat = "b", FloatStrat = -493.28f, VectorStrat = new float[]{ 1, 2, 3, 4 }, DateTimeStrat = new DateTime(2018, 2, 23),
+                    DateTimeOffsetStrat = new DateTimeOffset(2002, 2, 23, 3, 30, 0, new TimeSpan(4, 0, 0)), TimeSpanStrat = new TimeSpan(2, 0, 30)
+                },
+                new Input() {
+                    Id = 6, TextStrat = "c", FloatStrat = 6, VectorStrat = new float[]{ 3, 4, 5, 6 }, DateTimeStrat = new DateTime(2020,2 , 23),
+                    DateTimeOffsetStrat = new DateTimeOffset(2002, 2, 23, 3, 30, 0, new TimeSpan(3, 0, 0)), TimeSpanStrat = new TimeSpan(2, 0, 30)
+                },
+                new Input() {
+                    Id = 7, TextStrat = "d", FloatStrat = 6, VectorStrat = new float[]{ 4, 5, 6, 7 }, DateTimeStrat = new DateTime(2002, 2, 23),
+                    DateTimeOffsetStrat = new DateTimeOffset(2002, 2, 23, 3, 30, 0, new TimeSpan(4, 0, 0)), TimeSpanStrat = new TimeSpan(2, 0, 20)
+                },
+            });
+
+            // TEST TRAINTESTSPLIT
+            var split = mlContext.Data.TrainTestSplit(input, 0.5, nameof(Input.TextStrat));
+            var ids = split.TestSet.GetColumn<int>(split.TestSet.Schema[nameof(Input.Id)]);
+            Assert.Contains(1, ids);
+            Assert.Contains(5, ids);
+            split = mlContext.Data.TrainTestSplit(input, 0.5, nameof(Input.FloatStrat));
+            ids = split.TestSet.GetColumn<int>(split.TestSet.Schema[nameof(Input.Id)]);
+            Assert.Contains(4, ids);
+            Assert.Contains(5, ids);
+            split = mlContext.Data.TrainTestSplit(input, 0.5, nameof(Input.VectorStrat));
+            ids = split.TestSet.GetColumn<int>(split.TestSet.Schema[nameof(Input.Id)]);
+            Assert.Contains(0, ids);
+            Assert.Contains(4, ids);
+            split = mlContext.Data.TrainTestSplit(input, 0.5, nameof(Input.DateTimeStrat));
+            ids = split.TestSet.GetColumn<int>(split.TestSet.Schema[nameof(Input.Id)]);
+            Assert.Contains(5, ids);
+            Assert.Contains(6, ids);
+            split = mlContext.Data.TrainTestSplit(input, 0.5, nameof(Input.DateTimeOffsetStrat));
+            ids = split.TrainSet.GetColumn<int>(split.TrainSet.Schema[nameof(Input.Id)]);
+            Assert.Contains(4, ids);
+            Assert.Contains(7, ids);
+            split = mlContext.Data.TrainTestSplit(input, 0.5, nameof(Input.TimeSpanStrat));
+            ids = split.TestSet.GetColumn<int>(split.TestSet.Schema[nameof(Input.Id)]);
+            Assert.Contains(1, ids);
+            Assert.Contains(2, ids);
+
+            var inputWithKey = mlContext.Transforms.Conversion.MapValueToKey("KeyStrat", "TextStrat").Fit(input).Transform(input);
+            split = mlContext.Data.TrainTestSplit(inputWithKey, 0.5, "KeyStrat");
+            ids = split.TestSet.GetColumn<int>(split.TestSet.Schema[nameof(Input.Id)]);
+            Assert.Contains(1, ids);
+            Assert.Contains(5, ids);
+            Assert.NotNull(split.TrainSet.Schema.GetColumnOrNull("KeyStrat")); // Check that the key column used as SamplingKeyColumn wasn't deleted by the split
+
+            // TEST CROSSVALIDATIONSPLIT
+            var colnames = new[] {
+                nameof(Input.TextStrat),
+                nameof(Input.FloatStrat),
+                nameof(Input.VectorStrat),
+                nameof(Input.DateTimeStrat),
+                nameof(Input.DateTimeOffsetStrat),
+                nameof(Input.TimeSpanStrat),
+                "KeyStrat" };
+
+            foreach(var colname in colnames)
+            {
+                var cvSplits = mlContext.Data.CrossValidationSplit(inputWithKey, numberOfFolds: 2, samplingKeyColumnName: colname);
+                var idsTest1 = cvSplits[0].TestSet.GetColumn<int>(cvSplits[0].TestSet.Schema[nameof(Input.Id)]);
+                var idsTest2 = cvSplits[1].TestSet.GetColumn<int>(cvSplits[1].TestSet.Schema[nameof(Input.Id)]);
+                Assert.True(Enumerable.Intersect(idsTest1, idsTest2).Count() == 0);
+                Assert.True(idsTest1.Count() > 0, $"CV Split 0 for Column {colname} was empty");
+                Assert.True(idsTest2.Count() > 0, $"CV Split 1 for Column {colname} was empty");
+
+                // Check that using CV didn't remove the SamplingKeyColumn
+                Assert.NotNull(split.TrainSet.Schema.GetColumnOrNull(colname));
+            }
+        }
     }
 }

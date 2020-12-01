@@ -6,7 +6,7 @@ namespace Microsoft.ML
 {
     /// <summary>
     /// Type of prediction task. Note that this is a legacy structure and usage of this should generally be
-    /// discouraged in future projects. Its presence suggests that there are priviledged and supported
+    /// discouraged in future projects. Its presence suggests that there are privileged and supported
     /// tasks, and anything outside of this is unsupported. This runs rather contrary to the idea of this
     /// being an expandable framework, and it is inappropriately limiting. For legacy pipelines based on
     /// <see cref="ITrainer"/> and <see cref="IPredictor"/> it is still useful, but for things based on
@@ -19,7 +19,7 @@ namespace Microsoft.ML
         Custom = 1,
 
         BinaryClassification = 2,
-        MultiClassClassification = 3,
+        MulticlassClassification = 3,
         Regression = 4,
         MultiOutputRegression = 5,
         Ranking = 6,

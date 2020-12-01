@@ -5,7 +5,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Command;
 using Microsoft.ML.CommandLine;
@@ -44,7 +43,7 @@ namespace Microsoft.ML.Data
     {
         public sealed class Arguments : DataCommand.ArgumentsBase
         {
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Column to use for features when scorer is not defined", ShortName = "feat")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Column to use for features when scorer is not defined", ShortName = "feat")]
             public string FeatureColumn = DefaultColumnNames.Features;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Group column name", ShortName = "group")]
@@ -61,7 +60,7 @@ namespace Microsoft.ML.Data
             [Argument(ArgumentType.Multiple, HelpText = "The data saver to use", SignatureType = typeof(SignatureDataSaver))]
             public IComponentFactory<IDataSaver> Saver;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "File to save the data", ShortName = "dout")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "File to save the data", ShortName = "dout")]
             public string OutputDataFile;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Whether to include hidden columns", ShortName = "keep")]

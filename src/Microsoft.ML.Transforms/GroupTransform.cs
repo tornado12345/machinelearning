@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -296,7 +295,7 @@ namespace Microsoft.ML.Transforms
                     // Prepare column's type.
                     var aggregatedValueType = sourceSchema[groupValueColumnName].Type as PrimitiveDataViewType;
                     _ectx.CheckValue(aggregatedValueType, nameof(aggregatedValueType), "Columns being aggregated must be primitive types such as string, float, or integer");
-                    var aggregatedResultType = new VectorType(aggregatedValueType);
+                    var aggregatedResultType = new VectorDataViewType(aggregatedValueType);
 
                     // Add column into output schema.
                     schemaBuilder.AddColumn(groupValueColumnName, aggregatedResultType, metadataBuilder.ToAnnotations());
@@ -393,6 +392,9 @@ namespace Microsoft.ML.Transforms
             /// </summary>
             private sealed class GroupKeyColumnChecker
             {
+                private static readonly FuncStaticMethodInfo1<DataViewRow, int, Func<bool>> _makeSameCheckerMethodInfo
+                    = new FuncStaticMethodInfo1<DataViewRow, int, Func<bool>>(MakeSameChecker<int>);
+
                 public readonly Func<bool> IsSameKey;
 
                 private static Func<bool> MakeSameChecker<T>(DataViewRow row, int col)
@@ -426,9 +428,7 @@ namespace Microsoft.ML.Transforms
                     Contracts.AssertValue(row);
                     var type = row.Schema[col].Type;
 
-                    Func<DataViewRow, int, Func<bool>> del = MakeSameChecker<int>;
-                    var mi = del.GetMethodInfo().GetGenericMethodDefinition().MakeGenericMethod(type.RawType);
-                    IsSameKey = (Func<bool>)mi.Invoke(null, new object[] { row, col });
+                    IsSameKey = Utils.MarshalInvoke(_makeSameCheckerMethodInfo, type.RawType, row, col);
                 }
             }
 

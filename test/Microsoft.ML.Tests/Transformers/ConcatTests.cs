@@ -2,8 +2,8 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using System;
 using System.IO;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Data.IO;
 using Microsoft.ML.RunTests;
@@ -19,7 +19,26 @@ namespace Microsoft.ML.Tests.Transformers
         }
 
         [Fact]
-        void TestConcat()
+        public void TestConcatNoInputColumns()
+        {
+            var thrown = false;
+
+            try
+            {
+                var pipe = ML.Transforms.Concatenate("Features");
+            }
+            catch(Exception ex)
+            {
+                Assert.Contains("Input columns not specified", ex.Message);
+                thrown = true;
+
+            }
+            Assert.True(thrown);
+            Done();
+        }
+
+        [Fact]
+        public void TestConcat()
         {
             string dataPath = GetDataPath("adult.tiny.with-schema.txt");
 
@@ -37,7 +56,7 @@ namespace Microsoft.ML.Tests.Transformers
             }, new MultiFileSource(dataPath));
             var data = loader.Load(source);
 
-            DataViewType GetType(DataViewSchema schema, string name)
+            static DataViewType GetType(DataViewSchema schema, string name)
             {
                 Assert.True(schema.TryGetColumnIndex(name, out int cIdx), $"Could not find '{name}'");
                 return schema[cIdx].Type;
@@ -53,13 +72,13 @@ namespace Microsoft.ML.Tests.Transformers
 
             DataViewType t;
             t = GetType(data.Schema, "f1");
-            Assert.True(t is VectorType vt1 && vt1.ItemType == NumberDataViewType.Single && vt1.Size == 1);
+            Assert.True(t is VectorDataViewType vt1 && vt1.ItemType == NumberDataViewType.Single && vt1.Size == 1);
             t = GetType(data.Schema, "f2");
-            Assert.True(t is VectorType vt2 && vt2.ItemType == NumberDataViewType.Single && vt2.Size == 2);
+            Assert.True(t is VectorDataViewType vt2 && vt2.ItemType == NumberDataViewType.Single && vt2.Size == 2);
             t = GetType(data.Schema, "f3");
-            Assert.True(t is VectorType vt3 && vt3.ItemType == NumberDataViewType.Single && vt3.Size == 5);
+            Assert.True(t is VectorDataViewType vt3 && vt3.ItemType == NumberDataViewType.Single && vt3.Size == 5);
             t = GetType(data.Schema, "f4");
-            Assert.True(t is VectorType vt4 && vt4.ItemType == NumberDataViewType.Single && vt4.Size == 0);
+            Assert.True(t is VectorDataViewType vt4 && vt4.ItemType == NumberDataViewType.Single && vt4.Size == 0);
 
             data = ML.Transforms.SelectColumns("f1", "f2", "f3", "f4").Fit(data).Transform(data);
 
@@ -94,7 +113,7 @@ namespace Microsoft.ML.Tests.Transformers
             }, new MultiFileSource(dataPath));
             var data = loader.Load(source);
 
-            DataViewType GetType(DataViewSchema schema, string name)
+            static DataViewType GetType(DataViewSchema schema, string name)
             {
                 Assert.True(schema.TryGetColumnIndex(name, out int cIdx), $"Could not find '{name}'");
                 return schema[cIdx].Type;
@@ -121,9 +140,9 @@ namespace Microsoft.ML.Tests.Transformers
 
             DataViewType t;
             t = GetType(data.Schema, "f2");
-            Assert.True(t is VectorType vt2 && vt2.ItemType == NumberDataViewType.Single && vt2.Size == 2);
+            Assert.True(t is VectorDataViewType vt2 && vt2.ItemType == NumberDataViewType.Single && vt2.Size == 2);
             t = GetType(data.Schema, "f3");
-            Assert.True(t is VectorType vt3 && vt3.ItemType == NumberDataViewType.Single && vt3.Size == 5);
+            Assert.True(t is VectorDataViewType vt3 && vt3.ItemType == NumberDataViewType.Single && vt3.Size == 5);
 
             data = ML.Transforms.SelectColumns("f2", "f3" ).Fit(data).Transform(data);
 

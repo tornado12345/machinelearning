@@ -4,7 +4,6 @@
 
 using System;
 using System.IO;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Data.IO;
 using Microsoft.ML.Model;
@@ -50,7 +49,7 @@ namespace Microsoft.ML.Tests
         }
 
         [Fact]
-        void TestDifferentTypes()
+        public void TestDifferentTypes()
         {
             string dataPath = GetDataPath("adult.tiny.with-schema.txt");
 
@@ -93,7 +92,7 @@ namespace Microsoft.ML.Tests
         }
 
         [Fact]
-        void TestSimpleCase()
+        public void TestSimpleCase()
         {
             var data = new[] { new TestClass() { A = 1, B = 2, C = 3, }, new TestClass() { A = 4, B = 5, C = 6 } };
 
@@ -111,7 +110,7 @@ namespace Microsoft.ML.Tests
         }
 
         [Fact]
-        void TestOldSavingAndLoading()
+        public void TestOldSavingAndLoading()
         {
             var data = new[] { new TestClass() { A = 1, B = 2, C = 3, }, new TestClass() { A = 4, B = 5, C = 6 } };
             var dataView = ML.Data.LoadFromEnumerable(data);
@@ -133,7 +132,7 @@ namespace Microsoft.ML.Tests
         }
 
         [Fact]
-        void TestMetadataCopy()
+        public void TestMetadataCopy()
         {
             var data = new[] { new TestMetaClass() { Term = "A", NotUsed = 1 }, new TestMetaClass() { Term = "B" }, new TestMetaClass() { Term = "C" } };
             var dataView = ML.Data.LoadFromEnumerable(data);
@@ -145,13 +144,13 @@ namespace Microsoft.ML.Tests
             result.Schema.TryGetColumnIndex("T", out int termIndex);
             var names1 = default(VBuffer<ReadOnlyMemory<char>>);
             var type1 = result.Schema[termIndex].Type;
-            var itemType1 = (type1 as VectorType)?.ItemType ?? type1;
+            var itemType1 = (type1 as VectorDataViewType)?.ItemType ?? type1;
             result.Schema[termIndex].GetKeyValues(ref names1);
             Assert.True(names1.GetValues().Length > 0);
         }
 
         [Fact]
-        void TestCommandLine()
+        public void TestCommandLine()
         {
             Assert.Equal(0, Maml.Main(new[] { @"showschema loader=Text{col=A:R4:0} xf=Term{col=B:A} in=f:\2.txt" }));
         }

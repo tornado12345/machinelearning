@@ -8,7 +8,7 @@ using System.Linq;
 using Microsoft.ML.Data;
 using Microsoft.ML.Model;
 using Microsoft.ML.RunTests;
-using Microsoft.ML.StaticPipe;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Tools;
 using Microsoft.ML.Transforms;
 using Xunit;
@@ -51,9 +51,9 @@ namespace Microsoft.ML.Tests.Transformers
             var validFitInvalidData = ML.Data.LoadFromEnumerable(new[] { new TestClassBiggerSize { A = new float[200] }, new TestClassBiggerSize { A = new float[200] } });
             var dataView = ML.Data.LoadFromEnumerable(data);
 
-            var pipe = ML.Transforms.RandomFourierKernelMap(new[]{
-                    new RandomFourierKernelMappingEstimator.ColumnOptions("RffA", 5, false, "A"),
-                    new RandomFourierKernelMappingEstimator.ColumnOptions("RffB", 10, true, "A", new LaplacianKernel())
+            var pipe = ML.Transforms.ApproximatedKernelMap(new[]{
+                    new ApproximatedKernelMappingEstimator.ColumnOptions("RffA", 5, false, "A"),
+                    new ApproximatedKernelMappingEstimator.ColumnOptions("RffB", 10, true, "A", new LaplacianKernel())
                 });
 
             TestEstimatorCore(pipe, dataView, invalidInput: invalidData, validForFitNotValidForTransformInput: validFitInvalidData);
@@ -61,24 +61,20 @@ namespace Microsoft.ML.Tests.Transformers
         }
 
         [Fact]
-        public void RffStatic()
+        public void ApproximateKernelMap()
         {
-            string dataPath = GetDataPath("breast-cancer.txt");
-            var reader = TextLoaderStatic.CreateLoader(ML, ctx => (
-                VectorFloat: ctx.LoadFloat(1, 8),
-                Label: ctx.LoadFloat(0)
-            ));
+            string dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
+            var data = ML.Data.LoadFromTextFile(dataPath, new[] {
+                new TextLoader.Column("VectorFloat", DataKind.Single, 1, 8),
+                new TextLoader.Column("Label", DataKind.Single, 0)
+            });
 
-            var data = reader.Load(dataPath);
+            var est = ML.Transforms.ApproximatedKernelMap("RffVectorFloat", "VectorFloat", 3, true);
 
-            var est = data.MakeNewEstimator()
-                .Append(row => (
-                RffVectorFloat: row.VectorFloat.LowerVectorSizeWithRandomFourierTransformation(3, true), row.Label));
-
-            TestEstimatorCore(est.AsDynamic, data.AsDynamic);
+            TestEstimatorCore(est, data);
 
             var outputPath = GetOutputPath("Rff", "featurized.tsv");
-            var savedData = ML.Data.TakeRows(est.Fit(data).Transform(data).AsDynamic, 4);
+            var savedData = ML.Data.TakeRows(est.Fit(data).Transform(data), 4);
             using (var fs = File.Create(outputPath))
                 ML.Data.SaveAsText(savedData, fs, headerRow: true, keepHidden: true);
             CheckEquality("Rff", "featurized.tsv");
@@ -101,9 +97,9 @@ namespace Microsoft.ML.Tests.Transformers
             };
             var dataView = ML.Data.LoadFromEnumerable(data);
 
-            var est = ML.Transforms.RandomFourierKernelMap(new[]{
-                    new RandomFourierKernelMappingEstimator.ColumnOptions("RffA", 5, false, "A"),
-                    new RandomFourierKernelMappingEstimator.ColumnOptions("RffB", 10, true, "A", new LaplacianKernel())
+            var est = ML.Transforms.ApproximatedKernelMap(new[]{
+                    new ApproximatedKernelMappingEstimator.ColumnOptions("RffA", 5, false, "A"),
+                    new ApproximatedKernelMappingEstimator.ColumnOptions("RffB", 10, true, "A", new LaplacianKernel())
                 });
             var result = est.Fit(dataView).Transform(dataView);
             var resultRoles = new RoleMappedData(result);

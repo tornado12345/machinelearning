@@ -3,14 +3,13 @@
 // See the LICENSE file in the project root for more information.
 
 using System.Collections.Generic;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
 
 namespace Microsoft.ML.Data
 {
     /// <summary>
-    /// Encapsulates an <see cref="Schema"/> plus column role mapping information. The purpose of role mappings is to
+    /// Encapsulates a <see cref="DataViewSchema"/> plus column role mapping information. The purpose of role mappings is to
     /// provide information on what the intended usage is for. That is: while a given data view may have a column named
     /// "Features", by itself that is insufficient: the trainer must be fed a role mapping that says that the role
     /// mapping for features is filled by that "Features" column. This allows things like columns not named "Features"
@@ -26,7 +25,7 @@ namespace Microsoft.ML.Data
     /// in this schema.
     /// </summary>
     /// <remarks>
-    /// Note that instances of this class are, like instances of <see cref="Schema"/>, immutable.
+    /// Note that instances of this class are, like instances of <see cref="DataViewSchema"/>, immutable.
     ///
     /// It is often the case that one wishes to bundle the actual data with the role mappings, not just the schema. For
     /// that case, please use the <see cref="RoleMappedData"/> class.

@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Runtime.CompilerServices;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Model.OnnxConverter;
@@ -519,6 +518,274 @@ namespace Microsoft.ML.Transforms
         }
     }
 
+    internal static partial class MedianAggregatorUtils
+    {
+        /// <summary>
+        /// This heap class is based on the one done by Egor Grishechko, https://egorikas.com/max-and-min-heap-implementation-with-csharp/, which he based
+        /// on the implementation shown by HackerRank https://www.youtube.com/watch?v=t0Cq6tVNRBA. It is used for calculation the median in a much more
+        /// memory efficient way.
+        /// </summary>
+        /// <typeparam name="TType"></typeparam>
+        [BestFriend]
+        internal abstract class HeapBase<TType> where TType : IComparable<TType>
+        {
+            protected readonly List<TType> Elements;
+
+            public HeapBase(int startingSize)
+            {
+                Elements = new List<TType>(startingSize);
+            }
+
+            protected int GetLeftChildIndex(int elementIndex) => 2 * elementIndex + 1;
+            protected int GetRightChildIndex(int elementIndex) => 2 * elementIndex + 2;
+            protected int GetParentIndex(int elementIndex) => (elementIndex - 1) / 2;
+
+            protected bool HasLeftChild(int elementIndex) => GetLeftChildIndex(elementIndex) < Elements.Count;
+            protected bool HasRightChild(int elementIndex) => GetRightChildIndex(elementIndex) < Elements.Count;
+            protected bool IsRoot(int elementIndex) => elementIndex == 0;
+
+            protected TType GetLeftChild(int elementIndex) => Elements[GetLeftChildIndex(elementIndex)];
+            protected TType GetRightChild(int elementIndex) => Elements[GetRightChildIndex(elementIndex)];
+            protected TType GetParent(int elementIndex) => Elements[GetParentIndex(elementIndex)];
+
+            protected void Swap(int firstIndex, int secondIndex)
+            {
+                var temp = Elements[firstIndex];
+                Elements[firstIndex] = Elements[secondIndex];
+                Elements[secondIndex] = temp;
+            }
+
+            public TType Peek()
+            {
+                Contracts.Check(Elements.Count > 0, "Cannot peek with 0 elements");
+
+                return Elements[0];
+            }
+
+            public TType Pop()
+            {
+                Contracts.Check(Elements.Count > 0, "Cannot pop with 0 elements");
+
+                var result = Elements[0];
+                Elements[0] = Elements[Elements.Count - 1];
+
+                // Remove last element from list. RemoveAt is normally O(n), but in this case since its the last item, its O(1).
+                // You can view the reference source, https://referencesource.microsoft.com/#mscorlib/system/collections/generic/list.cs,3d46113cc199059a,references,
+                // and see that the copy will be missed because index < _size returns false.
+                Elements.RemoveAt(Elements.Count - 1);
+
+                ReCalculateDown();
+
+                return result;
+            }
+
+            public void Add(TType element)
+            {
+                Elements.Add(element);
+
+                ReCalculateUp();
+            }
+
+            public int Count() => Elements.Count;
+
+            protected abstract void ReCalculateUp();
+            protected abstract void ReCalculateDown();
+        }
+
+        // Specialization of HeapBase with the root being the maximum value.
+        [BestFriend]
+        internal sealed class MaxHeap<TType> : HeapBase<TType> where TType : IComparable<TType>
+        {
+
+            public MaxHeap(int startingSize) :
+                base(startingSize)
+            {
+            }
+
+            protected override void ReCalculateDown()
+            {
+                int index = 0;
+                while (HasLeftChild(index))
+                {
+                    var biggerIndex = GetLeftChildIndex(index);
+                    if (HasRightChild(index) && GetRightChild(index).CompareTo(GetLeftChild(index)) > 0)
+                    {
+                        biggerIndex = GetRightChildIndex(index);
+                    }
+
+                    if (Elements[biggerIndex].CompareTo(Elements[index]) <= 0)
+                    {
+                        break;
+                    }
+
+                    Swap(biggerIndex, index);
+                    index = biggerIndex;
+                }
+            }
+
+            protected override void ReCalculateUp()
+            {
+                var index = Elements.Count - 1;
+                while (!IsRoot(index) && Elements[index].CompareTo(GetParent(index)) > 0)
+                {
+                    var parentIndex = GetParentIndex(index);
+                    Swap(parentIndex, index);
+                    index = parentIndex;
+                }
+            }
+        }
+
+        // Specialization of HeapBase with the root being the minimum value.
+        [BestFriend]
+        internal sealed class MinHeap<TType> : HeapBase<TType> where TType : IComparable<TType>
+        {
+
+            public MinHeap(int startingSize) :
+                base(startingSize)
+            {
+            }
+
+            protected override void ReCalculateDown()
+            {
+                int index = 0;
+                while (HasLeftChild(index))
+                {
+                    var smallerIndex = GetLeftChildIndex(index);
+                    if (HasRightChild(index) && GetRightChild(index).CompareTo(GetLeftChild(index)) < 0)
+                    {
+                        smallerIndex = GetRightChildIndex(index);
+                    }
+
+                    if (Elements[smallerIndex].CompareTo(Elements[index]) >= 0)
+                    {
+                        break;
+                    }
+
+                    Swap(smallerIndex, index);
+                    index = smallerIndex;
+                }
+            }
+
+            protected override void ReCalculateUp()
+            {
+                var index = Elements.Count - 1;
+                while (!IsRoot(index) && Elements[index].CompareTo(GetParent(index)) < 0)
+                {
+                    var parentIndex = GetParentIndex(index);
+                    Swap(parentIndex, index);
+                    index = parentIndex;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Based on the algorithm on GeeksForGeeks https://www.geeksforgeeks.org/median-of-stream-of-integers-running-integers/.
+        /// This heap approach uses much less memory and is faster then other approaches I could find, specifically list based ones.
+        /// </summary>
+        /// <param name="num">The new number to account for in our median calculation.</param>
+        /// <param name="median">The current median.</param>
+        /// <param name="belowMedianHeap">The MaxHeap that has all the numbers below the median.</param>
+        /// <param name="aboveMedianHeap">The MinHeap that has all the numbers above the median.</param>
+        [BestFriend]
+        internal static void GetMedianSoFar(in float num, ref float median, ref MaxHeap<float> belowMedianHeap, ref MinHeap<float> aboveMedianHeap)
+        {
+            int comparison = belowMedianHeap.Count().CompareTo(aboveMedianHeap.Count());
+
+            if (comparison < 0)
+            { // More elements in aboveMedianHeap than belowMedianHeap.
+                if (num < median)
+                { // Current element belongs in the belowMedianHeap.
+                    // Insert new number into belowMedianHeap
+                    belowMedianHeap.Add(num);
+
+                }
+                else
+                { // Current element belongs in aboveMedianHeap.
+                    // Need to move one to belowMedianHeap to keep heeps balanced.
+                    belowMedianHeap.Add(aboveMedianHeap.Pop());
+
+                    aboveMedianHeap.Add(num);
+                }
+
+                // Both heaps are balanced so median is the average of the 2 heaps.
+                median = (aboveMedianHeap.Peek() + belowMedianHeap.Peek()) / 2;
+
+            }
+            else if (comparison == 0)
+            { // Both heaps have the same number of elements. Simple put the number where it belongs.
+                if (num < median)
+                { // Current element belongs in the belowMedianHeap.
+                    belowMedianHeap.Add(num);
+
+                    // Now we have an odd number of items, median is the new root of the belowMedianHeap
+                    median = belowMedianHeap.Peek();
+
+                }
+                else
+                { // Current element belongs in above median heap.
+                    aboveMedianHeap.Add(num);
+
+                    // Now we have an odd number of items, median is the new root of the aboveMedianHeap
+                    median = aboveMedianHeap.Peek();
+                }
+
+            }
+            else
+            { // More elements in belowMedianHeap than aboveMedianHeap.
+                if (num < median)
+                { // Current element belongs in the belowMedianHeap.
+                    // Need to move one to aboveMedianHeap to keep heeps balanced.
+                    aboveMedianHeap.Add(belowMedianHeap.Pop());
+
+                    // Insert new number into belowMedianHeap
+                    belowMedianHeap.Add(num);
+
+                }
+                else
+                { // Current element belongs in aboveMedianHeap.
+                    aboveMedianHeap.Add(num);
+                }
+
+                // Both heaps are balanced so median is the average of the 2 heaps.
+                median = (aboveMedianHeap.Peek() + belowMedianHeap.Peek()) / 2;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Base class for tracking median values for a single valued column.
+    /// It tracks median values of non-sparse values (vCount).
+    /// </summary>
+    internal sealed class MedianSngAggregator : IColumnAggregator<TFloat>
+    {
+        private MedianAggregatorUtils.MaxHeap<float> _belowMedianHeap;
+        private MedianAggregatorUtils.MinHeap<float> _aboveMedianHeap;
+        private float _median;
+
+        public MedianSngAggregator(int contatinerStartingSize = 1000)
+        {
+            Contracts.Check(contatinerStartingSize > 0);
+            _belowMedianHeap = new MedianAggregatorUtils.MaxHeap<TFloat>(contatinerStartingSize);
+            _aboveMedianHeap = new MedianAggregatorUtils.MinHeap<TFloat>(contatinerStartingSize);
+            _median = default;
+        }
+
+        public TFloat Median
+        {
+            get { return _median; }
+        }
+
+        public void ProcessValue(in TFloat value)
+        {
+            MedianAggregatorUtils.GetMedianSoFar(value, ref _median, ref _belowMedianHeap, ref _aboveMedianHeap);
+        }
+
+        public void Finish()
+        {
+            // Finish is a no-op because we are updating the median continually as we go
+        }
+    }
+
     internal sealed partial class NormalizeTransform
     {
         internal abstract partial class AffineColumnFunction
@@ -545,7 +812,7 @@ namespace Microsoft.ML.Transforms
 
                     public static new ImplOne Create(ModelLoadContext ctx, IHost host, DataViewType typeSrc)
                     {
-                        host.Check(typeSrc.RawType == typeof(TFloat), "The column type must be R4.");
+                        host.Check(typeSrc.RawType == typeof(TFloat), "The column type must be Single.");
                         List<int> nz = null;
                         int cfeat;
                         TFloat[] scales;
@@ -606,9 +873,9 @@ namespace Microsoft.ML.Transforms
                     {
                     }
 
-                    public static ImplVec Create(ModelLoadContext ctx, IHost host, VectorType typeSrc)
+                    public static ImplVec Create(ModelLoadContext ctx, IHost host, VectorDataViewType typeSrc)
                     {
-                        host.Check(typeSrc.ItemType.RawType == typeof(TFloat), "The column type must be vector of R4.");
+                        host.Check(typeSrc.ItemType.RawType == typeof(TFloat), "The column type must be vector of Single.");
                         int cv = Math.Max(1, typeSrc.Size);
                         List<int> nz = null;
                         int cfeat;
@@ -872,7 +1139,7 @@ namespace Microsoft.ML.Transforms
 
                     public static new ImplOne Create(ModelLoadContext ctx, IHost host, DataViewType typeSrc)
                     {
-                        host.Check(typeSrc.RawType == typeof(TFloat), "The column type must be R4.");
+                        host.Check(typeSrc.RawType == typeof(TFloat), "The column type must be Single.");
                         host.CheckValue(ctx, nameof(ctx));
                         ctx.CheckAtModel(GetVersionInfo());
 
@@ -935,9 +1202,9 @@ namespace Microsoft.ML.Transforms
                     {
                     }
 
-                    public static ImplVec Create(ModelLoadContext ctx, IHost host, VectorType typeSrc)
+                    public static ImplVec Create(ModelLoadContext ctx, IHost host, VectorDataViewType typeSrc)
                     {
-                        host.Check(typeSrc.ItemType.RawType == typeof(TFloat), "The column type must be vector of R4.");
+                        host.Check(typeSrc.ItemType.RawType == typeof(TFloat), "The column type must be vector of Single.");
                         int cv = Math.Max(1, typeSrc.Size);
 
                         host.CheckValue(ctx, nameof(ctx));
@@ -1056,7 +1323,7 @@ namespace Microsoft.ML.Transforms
 
                     public static new ImplOne Create(ModelLoadContext ctx, IHost host, DataViewType typeSrc)
                     {
-                        host.Check(typeSrc.RawType == typeof(TFloat), "The column type must be R4.");
+                        host.Check(typeSrc.RawType == typeof(TFloat), "The column type must be Single.");
                         host.CheckValue(ctx, nameof(ctx));
                         ctx.CheckAtModel(GetVersionInfo());
 
@@ -1139,9 +1406,9 @@ namespace Microsoft.ML.Transforms
                         }
                     }
 
-                    public static ImplVec Create(ModelLoadContext ctx, IHost host, VectorType typeSrc)
+                    public static ImplVec Create(ModelLoadContext ctx, IHost host, VectorDataViewType typeSrc)
                     {
-                        host.Check(typeSrc.ItemType.RawType == typeof(TFloat), "The column type must be vector of R4.");
+                        host.Check(typeSrc.ItemType.RawType == typeof(TFloat), "The column type must be vector of Single.");
                         int cv = Math.Max(1, typeSrc.Size);
                         host.CheckValue(ctx, nameof(ctx));
                         ctx.CheckAtModel(GetVersionInfo());
@@ -1437,8 +1704,8 @@ namespace Microsoft.ML.Transforms
                 public static IColumnFunctionBuilder Create(NormalizingEstimator.MinMaxColumnOptions column, IHost host, DataViewType srcType,
                     ValueGetter<TFloat> getter)
                 {
-                    host.CheckUserArg(column.MaxTrainingExamples > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
-                    return new MinMaxOneColumnFunctionBuilder(host, column.MaxTrainingExamples, column.FixZero, getter);
+                    host.CheckUserArg(column.MaximumExampleCount > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    return new MinMaxOneColumnFunctionBuilder(host, column.MaximumExampleCount, column.EnsureZeroUntouched, getter);
                 }
 
                 public override IColumnFunction CreateColumnFunction()
@@ -1484,12 +1751,12 @@ namespace Microsoft.ML.Transforms
                 {
                 }
 
-                public static IColumnFunctionBuilder Create(NormalizingEstimator.MinMaxColumnOptions column, IHost host, VectorType srcType,
+                public static IColumnFunctionBuilder Create(NormalizingEstimator.MinMaxColumnOptions column, IHost host, VectorDataViewType srcType,
                     ValueGetter<VBuffer<TFloat>> getter)
                 {
-                    host.CheckUserArg(column.MaxTrainingExamples > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
+                    host.CheckUserArg(column.MaximumExampleCount > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
                     var cv = srcType.Size;
-                    return new MinMaxVecColumnFunctionBuilder(host, cv, column.MaxTrainingExamples, column.FixZero, getter);
+                    return new MinMaxVecColumnFunctionBuilder(host, cv, column.MaximumExampleCount, column.EnsureZeroUntouched, getter);
                 }
 
                 public override IColumnFunction CreateColumnFunction()
@@ -1546,19 +1813,19 @@ namespace Microsoft.ML.Transforms
                     _buffer = new VBuffer<TFloat>(1, new TFloat[1]);
                 }
 
-                public static IColumnFunctionBuilder Create(NormalizingEstimator.MeanVarColumnOptions column, IHost host, DataViewType srcType,
+                public static IColumnFunctionBuilder Create(NormalizingEstimator.MeanVarianceColumnOptions column, IHost host, DataViewType srcType,
                     ValueGetter<TFloat> getter)
                 {
-                    host.CheckUserArg(column.MaxTrainingExamples > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
-                    return new MeanVarOneColumnFunctionBuilder(host, column.MaxTrainingExamples, column.FixZero, getter, false, column.UseCdf);
+                    host.CheckUserArg(column.MaximumExampleCount > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    return new MeanVarOneColumnFunctionBuilder(host, column.MaximumExampleCount, column.EnsureZeroUntouched, getter, false, column.UseCdf);
                 }
 
-                public static IColumnFunctionBuilder Create(NormalizingEstimator.LogMeanVarColumnOptions column, IHost host, DataViewType srcType,
+                public static IColumnFunctionBuilder Create(NormalizingEstimator.LogMeanVarianceColumnOptions column, IHost host, DataViewType srcType,
                     ValueGetter<TFloat> getter)
                 {
-                    var lim = column.MaxTrainingExamples;
-                    host.CheckUserArg(lim > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
-                    return new MeanVarOneColumnFunctionBuilder(host, lim, false, getter, true, column.UseCdf);
+                    var lim = column.MaximumExampleCount;
+                    host.CheckUserArg(lim > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    return new MeanVarOneColumnFunctionBuilder(host, lim, column.EnsureZeroUntouched, getter, true, column.UseCdf);
                 }
 
                 protected override bool ProcessValue(in TFloat origVal)
@@ -1620,21 +1887,21 @@ namespace Microsoft.ML.Transforms
                     _useCdf = useCdf;
                 }
 
-                public static IColumnFunctionBuilder Create(NormalizingEstimator.MeanVarColumnOptions column, IHost host, VectorType srcType,
+                public static IColumnFunctionBuilder Create(NormalizingEstimator.MeanVarianceColumnOptions column, IHost host, VectorDataViewType srcType,
                     ValueGetter<VBuffer<TFloat>> getter)
                 {
-                    host.CheckUserArg(column.MaxTrainingExamples > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
+                    host.CheckUserArg(column.MaximumExampleCount > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
                     var cv = srcType.Size;
-                    return new MeanVarVecColumnFunctionBuilder(host, cv, column.MaxTrainingExamples, column.FixZero, getter, false, column.UseCdf);
+                    return new MeanVarVecColumnFunctionBuilder(host, cv, column.MaximumExampleCount, column.EnsureZeroUntouched, getter, false, column.UseCdf);
                 }
 
-                public static IColumnFunctionBuilder Create(NormalizingEstimator.LogMeanVarColumnOptions column, IHost host, VectorType srcType,
+                public static IColumnFunctionBuilder Create(NormalizingEstimator.LogMeanVarianceColumnOptions column, IHost host, VectorDataViewType srcType,
                     ValueGetter<VBuffer<TFloat>> getter)
                 {
-                    var lim = column.MaxTrainingExamples;
-                    host.CheckUserArg(lim > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
+                    var lim = column.MaximumExampleCount;
+                    host.CheckUserArg(lim > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
                     var cv = srcType.Size;
-                    return new MeanVarVecColumnFunctionBuilder(host, cv, lim, false, getter, true, column.UseCdf);
+                    return new MeanVarVecColumnFunctionBuilder(host, cv, lim, column.EnsureZeroUntouched, getter, true, column.UseCdf);
                 }
 
                 protected override bool ProcessValue(in VBuffer<TFloat> buffer)
@@ -1739,11 +2006,11 @@ namespace Microsoft.ML.Transforms
                 public static IColumnFunctionBuilder Create(NormalizingEstimator.BinningColumnOptions column, IHost host, DataViewType srcType,
                     ValueGetter<TFloat> getter)
                 {
-                    var lim = column.MaxTrainingExamples;
-                    host.CheckUserArg(lim > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
-                    bool fix = column.FixZero;
-                    var numBins = column.NumBins;
-                    host.CheckUserArg(numBins > 1, nameof(column.NumBins), "Must be greater than 1");
+                    var lim = column.MaximumExampleCount;
+                    host.CheckUserArg(lim > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    bool fix = column.EnsureZeroUntouched;
+                    var numBins = column.MaximumBinCount;
+                    host.CheckUserArg(numBins > 1, nameof(column.MaximumBinCount), "Must be greater than 1");
                     return new BinOneColumnFunctionBuilder(host, lim, fix, numBins, getter);
                 }
 
@@ -1785,14 +2052,14 @@ namespace Microsoft.ML.Transforms
                     }
                 }
 
-                public static IColumnFunctionBuilder Create(NormalizingEstimator.BinningColumnOptions column, IHost host, VectorType srcType,
+                public static IColumnFunctionBuilder Create(NormalizingEstimator.BinningColumnOptions column, IHost host, VectorDataViewType srcType,
                     ValueGetter<VBuffer<TFloat>> getter)
                 {
-                    var lim = column.MaxTrainingExamples;
-                    host.CheckUserArg(lim > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
-                    bool fix = column.FixZero;
-                    var numBins = column.NumBins;
-                    host.CheckUserArg(numBins > 1, nameof(column.NumBins), "Must be greater than 1");
+                    var lim = column.MaximumExampleCount;
+                    host.CheckUserArg(lim > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    bool fix = column.EnsureZeroUntouched;
+                    var numBins = column.MaximumBinCount;
+                    host.CheckUserArg(numBins > 1, nameof(column.MaximumBinCount), "Must be greater than 1");
                     var cv = srcType.Size;
                     return new BinVecColumnFunctionBuilder(host, cv, lim, fix, numBins, getter);
                 }
@@ -1872,13 +2139,13 @@ namespace Microsoft.ML.Transforms
 
                 public static IColumnFunctionBuilder Create(NormalizingEstimator.SupervisedBinningColumOptions column, IHost host, int valueColumnId, int labelColumnId, DataViewRow dataRow)
                 {
-                    var lim = column.MaxTrainingExamples;
-                    host.CheckUserArg(lim > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
-                    bool fix = column.FixZero;
-                    var numBins = column.NumBins;
-                    host.CheckUserArg(numBins > 1, nameof(column.NumBins), "Must be greater than 1");
-                    host.CheckUserArg(column.MinBinSize > 0, nameof(column.MinBinSize), "Must be positive");
-                    return new SupervisedBinOneColumnFunctionBuilder(host, lim, fix, numBins, column.MinBinSize, valueColumnId, labelColumnId, dataRow);
+                    var lim = column.MaximumExampleCount;
+                    host.CheckUserArg(lim > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    bool fix = column.EnsureZeroUntouched;
+                    var numBins = column.MaximumBinCount;
+                    host.CheckUserArg(numBins > 1, nameof(column.MaximumBinCount), "Must be greater than 1");
+                    host.CheckUserArg(column.MininimumBinSize > 0, nameof(column.MininimumBinSize), "Must be positive");
+                    return new SupervisedBinOneColumnFunctionBuilder(host, lim, fix, numBins, column.MininimumBinSize, valueColumnId, labelColumnId, dataRow);
                 }
             }
 
@@ -1912,13 +2179,148 @@ namespace Microsoft.ML.Transforms
 
                 public static IColumnFunctionBuilder Create(NormalizingEstimator.SupervisedBinningColumOptions column, IHost host, int valueColumnId, int labelColumnId, DataViewRow dataRow)
                 {
-                    var lim = column.MaxTrainingExamples;
-                    host.CheckUserArg(lim > 1, nameof(column.MaxTrainingExamples), "Must be greater than 1");
-                    bool fix = column.FixZero;
-                    var numBins = column.NumBins;
-                    host.CheckUserArg(numBins > 1, nameof(column.NumBins), "Must be greater than 1");
-                    host.CheckUserArg(column.MinBinSize > 0, nameof(column.MinBinSize), "Must be positive");
-                    return new SupervisedBinVecColumnFunctionBuilder(host, lim, fix, numBins, column.MinBinSize, valueColumnId, labelColumnId, dataRow);
+                    var lim = column.MaximumExampleCount;
+                    host.CheckUserArg(lim > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    bool fix = column.EnsureZeroUntouched;
+                    var numBins = column.MaximumBinCount;
+                    host.CheckUserArg(numBins > 1, nameof(column.MaximumBinCount), "Must be greater than 1");
+                    host.CheckUserArg(column.MininimumBinSize > 0, nameof(column.MininimumBinSize), "Must be positive");
+                    return new SupervisedBinVecColumnFunctionBuilder(host, lim, fix, numBins, column.MininimumBinSize, valueColumnId, labelColumnId, dataRow);
+                }
+            }
+
+            public sealed class RobustScalerOneColumnFunctionBuilder : OneColumnFunctionBuilderBase<TFloat>
+            {
+                private readonly MinMaxSngAggregator _minMaxAggregator;
+                private readonly MedianSngAggregator _medianAggregator;
+                private readonly bool _centerData;
+                private readonly uint _quantileMin;
+                private readonly uint _quantileMax;
+                private VBuffer<TFloat> _buffer;
+
+                private RobustScalerOneColumnFunctionBuilder(IHost host, long lim, bool centerData, uint quantileMin, uint quantileMax, ValueGetter<TFloat> getSrc)
+                    : base(host, lim, getSrc)
+                {
+                    // Using the MinMax aggregator since that is what needs to be found here as well.
+                    // The difference is how the min/max are used.
+                    _minMaxAggregator = new MinMaxSngAggregator(1);
+                    _medianAggregator = new MedianSngAggregator();
+                    _buffer = new VBuffer<TFloat>(1, new TFloat[1]);
+                    _centerData = centerData;
+                    _quantileMin = quantileMin;
+                    _quantileMax = quantileMax;
+                }
+
+                protected override bool ProcessValue(in TFloat val)
+                {
+                    if (!base.ProcessValue(in val))
+                        return false;
+                    VBufferEditor.CreateFromBuffer(ref _buffer).Values[0] = val;
+                    _minMaxAggregator.ProcessValue(in _buffer);
+                    _medianAggregator.ProcessValue(in val);
+                    return true;
+                }
+
+                public static IColumnFunctionBuilder Create(NormalizingEstimator.RobustScalingColumnOptions column, IHost host, DataViewType srcType,
+                    bool centerData, uint quantileMin, uint quantileMax, ValueGetter<TFloat> getter)
+                {
+                    host.CheckUserArg(column.MaximumExampleCount > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    return new RobustScalerOneColumnFunctionBuilder(host, column.MaximumExampleCount, centerData, quantileMin, quantileMax, getter);
+                }
+
+                public override IColumnFunction CreateColumnFunction()
+                {
+                    _minMaxAggregator.Finish();
+                    _medianAggregator.Finish();
+
+                    TFloat median = _medianAggregator.Median;
+                    TFloat range = _minMaxAggregator.Max[0] - _minMaxAggregator.Min[0];
+                    // Divide the range by 100 because we need to make the number, i.e. 75, into a decimal, .75
+                    TFloat quantileRange = (_quantileMax - _quantileMin) / 100f;
+                    TFloat scale = 1 / (range * quantileRange);
+
+                    if (_centerData)
+                        return AffineColumnFunction.Create(Host, scale, median);
+                    else
+                        return AffineColumnFunction.Create(Host, scale, 0);
+                }
+            }
+
+            public sealed class RobustScalerVecFunctionBuilder : OneColumnFunctionBuilderBase<VBuffer<TFloat>>
+            {
+                private readonly MinMaxSngAggregator _minMaxAggregator;
+                private readonly MedianSngAggregator[] _medianAggregators;
+                private readonly bool _centerData;
+                private readonly uint _quantileMin;
+                private readonly uint _quantileMax;
+
+                private RobustScalerVecFunctionBuilder(IHost host, long lim, int vectorSize, bool centerData, uint quantileMin, uint quantileMax, ValueGetter<VBuffer<TFloat>> getSrc)
+                    : base(host, lim, getSrc)
+                {
+                    // Using the MinMax aggregator since that is what needs to be found here as well.
+                    // The difference is how the min/max are used.
+                    _minMaxAggregator = new MinMaxSngAggregator(vectorSize);
+                    _medianAggregators = new MedianSngAggregator[vectorSize];
+
+                    for(int i = 0; i < vectorSize; i++)
+                    {
+                        _medianAggregators[i] = new MedianSngAggregator();
+                    }
+
+                    _centerData = centerData;
+                    _quantileMin = quantileMin;
+                    _quantileMax = quantileMax;
+                }
+
+                protected override bool ProcessValue(in VBuffer<TFloat> val)
+                {
+                    if (!base.ProcessValue(in val))
+                        return false;
+                    _minMaxAggregator.ProcessValue(in val);
+
+                    // Have to calculate the median per slot
+                    var span = val.GetValues();
+                    for (int i = 0; i < _medianAggregators.Length; i++)
+                    {
+                        _medianAggregators[i].ProcessValue(span[i]);
+                    }
+
+                    return true;
+                }
+
+                public static IColumnFunctionBuilder Create(NormalizingEstimator.RobustScalingColumnOptions column, IHost host, VectorDataViewType srcType,
+                    bool centerData, uint quantileMin, uint quantileMax, ValueGetter<VBuffer<TFloat>> getter)
+                {
+                    host.CheckUserArg(column.MaximumExampleCount > 1, nameof(column.MaximumExampleCount), "Must be greater than 1");
+                    var vectorSize = srcType.Size;
+                    return new RobustScalerVecFunctionBuilder(host, column.MaximumExampleCount, vectorSize, centerData, quantileMin, quantileMax, getter);
+                }
+
+                public override IColumnFunction CreateColumnFunction()
+                {
+                    _minMaxAggregator.Finish();
+
+                    TFloat[] scale = new TFloat[_medianAggregators.Length];
+                    TFloat[] median = new TFloat[_medianAggregators.Length];
+
+                    // Have to calculate the median per slot
+                    for (int i = 0; i < _medianAggregators.Length; i++)
+                    {
+                        _medianAggregators[i].Finish();
+                        median[i] = _medianAggregators[i].Median;
+
+                        TFloat range = _minMaxAggregator.Max[i] - _minMaxAggregator.Min[i];
+
+                        // Divide the range by 100 because we need to make the number, i.e. 75, into a decimal, .75
+                        TFloat quantileRange = (_quantileMax - _quantileMin) / 100f;
+                         scale[i] = 1 / (range * quantileRange);
+
+                    }
+
+                    if (_centerData)
+                        return AffineColumnFunction.Create(Host, scale, median, null);
+                    else
+                        return AffineColumnFunction.Create(Host, scale, null, null);
                 }
             }
         }

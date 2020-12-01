@@ -2,7 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Microsoft.Data.DataView;
 using Microsoft.ML.Runtime;
 
 namespace Microsoft.ML.Data
@@ -18,12 +17,14 @@ namespace Microsoft.ML.Data
         /// <remarks>
         /// The area under the ROC curve is equal to the probability that the algorithm ranks
         /// a randomly chosen positive instance higher than a randomly chosen negative one
-        /// (assuming 'positive' ranks higher than 'negative').
+        /// (assuming 'positive' ranks higher than 'negative'). Area under the ROC curve ranges between
+        /// 0 and 1, with a value closer to 1 indicating a better model.
         /// </remarks>
         public double AreaUnderRocCurve { get; }
 
         /// <summary>
-        /// Detection rate at K false positives.
+        /// Detection rate at K false positives. This gives the ratio of correctly identified anomalies given
+        /// the specified number of false positives. A value closer to 1 indicates a better model.
         /// </summary>
         /// <remarks>
         /// This is computed as follows:
@@ -34,13 +35,13 @@ namespace Microsoft.ML.Data
         ///  Predicted Anomalies     :         TP                |           FP
         ///  Predicted Non-Anomalies :         FN                |           TN
         ///  </remarks>
-        public double DetectionRateAtKFalsePositives { get; }
+        public double DetectionRateAtFalsePositiveCount { get; }
 
         internal AnomalyDetectionMetrics(IExceptionContext ectx, DataViewRow overallResult)
         {
             double FetchDouble(string name) => RowCursorUtils.Fetch<double>(ectx, overallResult, name);
             AreaUnderRocCurve = FetchDouble(BinaryClassifierEvaluator.Auc);
-            DetectionRateAtKFalsePositives = FetchDouble(AnomalyDetectionEvaluator.OverallMetrics.DrAtK);
+            DetectionRateAtFalsePositiveCount = FetchDouble(AnomalyDetectionEvaluator.OverallMetrics.DrAtK);
         }
     }
 }

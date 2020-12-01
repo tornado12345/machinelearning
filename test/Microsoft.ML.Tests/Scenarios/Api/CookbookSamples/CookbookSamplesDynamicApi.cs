@@ -4,17 +4,19 @@
 
 using System;
 using System.Collections.Generic;
-using System.IO;
+using System.Collections.Immutable;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.RunTests;
 using Microsoft.ML.TestFramework;
+using Microsoft.ML.TestFrameworkCommon;
+using Microsoft.ML.TestFrameworkCommon.Attributes;
 using Microsoft.ML.Trainers;
 using Microsoft.ML.Transforms;
 using Microsoft.ML.Transforms.Text;
 using Xunit;
 using Xunit.Abstractions;
+using static Microsoft.ML.Transforms.NormalizingTransformer;
 
 namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
 {
@@ -33,7 +35,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Read the data into a data view.
             var data = mlContext.Data.LoadFromTextFile<InspectedRow>(dataPath,
@@ -67,15 +69,86 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         public void InspectIntermediateDataGetColumn()
             => IntermediateData(GetDataPath("adult.tiny.with-schema.txt"));
 
+        private void InspectIntermediateTransformer()
+        {
+            // Create a new ML context, for ML.NET operations. It can be used for
+            // exception tracking and logging, as well as the source of randomness.
+            var mlContext = new MLContext();
+            var samples = new List<DataPoint>()
+            {
+                new DataPoint(){ Features = new float[4] { 8, 1, 3, 0},
+                    Label = true },
+
+                new DataPoint(){ Features = new float[4] { 6, 2, 2, 0},
+                    Label = true },
+
+                new DataPoint(){ Features = new float[4] { 4, 0, 1, 0},
+                    Label = false },
+
+                new DataPoint(){ Features = new float[4] { 2,-1,-1, 1},
+                    Label = false }
+
+            };
+            // Convert training data to IDataView, the general data type used in
+            // ML.NET.
+            var data = mlContext.Data.LoadFromEnumerable(samples);
+
+            // Create a pipeline to normalize the features and train a binary
+            // classifier. We use WithOnFitDelegate for the intermediate binning
+            // normalization step, so that we can inspect the properties of the
+            // normalizer after fitting.
+            NormalizingTransformer binningTransformer = null;
+            var pipeline =
+                mlContext.Transforms
+                .NormalizeBinning("Features", maximumBinCount: 3)
+                .WithOnFitDelegate(
+                fittedTransformer => binningTransformer = fittedTransformer)
+                .Append(mlContext.BinaryClassification.Trainers
+                .LbfgsLogisticRegression());
+
+            Console.WriteLine(binningTransformer == null);
+            // Expected Output:
+            //   True
+
+            var model = pipeline.Fit(data);
+
+            // During fitting binningTransformer will get assigned a new value
+            Console.WriteLine(binningTransformer == null);
+            // Expected Output:
+            //   False
+
+            // Inspect some of the properties of the binning transformer
+            var binningParam = binningTransformer.GetNormalizerModelParameters(0) as
+                BinNormalizerModelParameters<ImmutableArray<float>>;
+
+            for (int i = 0; i < binningParam.UpperBounds.Length; i++)
+            {
+                var upperBounds = string.Join(", ", binningParam.UpperBounds[i]);
+                Console.WriteLine(
+                    $"Bin {i}: Density = {binningParam.Density[i]}, " +
+                    $"Upper-bounds = {upperBounds}");
+
+            }
+            // Expected output:
+            //   Bin 0: Density = 2, Upper-bounds = 3, 7, Infinity
+            //   Bin 1: Density = 2, Upper-bounds = -0.5, 1.5, Infinity
+            //   Bin 2: Density = 2, Upper-bounds = 0, 2.5, Infinity
+            //   Bin 3: Density = 1, Upper-bounds = 0.5, Infinity
+        }
+
+        [Fact]
+        public void InspectIntermediateTransformerWithOnFitDelegate()
+            => InspectIntermediateTransformer();
+
         private void TrainRegression(string trainDataPath, string testDataPath, string modelPath)
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Step one: read the data as an IDataView.
             // Read the file (remember though, loaders are lazy, so the actual reading will happen when the data is accessed).
-            var trainData = mlContext.Data.LoadFromTextFile<AdultData>(trainDataPath,
+            var trainData = mlContext.Data.LoadFromTextFile<RegressionData>(trainDataPath,
                 // Default separator is tab, but we need a semicolon.
                 separatorChar: ';'
 ,
@@ -94,7 +167,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
             var pipeline =
                 // First 'normalize' the data (rescale to be
                 // between -1 and 1 for all examples), and then train the model.
-                mlContext.Transforms.Normalize("FeatureVector")
+                mlContext.Transforms.NormalizeMinMax("FeatureVector")
                 // We add a step for caching data in memory so that the downstream iterative training
                 // algorithm can efficiently scan through the data multiple times. Otherwise, the following
                 // trainer will read data from disk multiple times. The caching mechanism uses an on-demand strategy.
@@ -105,13 +178,13 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
                 // once so adding a caching step before it is not helpful.
                 .AppendCacheCheckpoint(mlContext)
                 // Add the SDCA regression trainer.
-                .Append(mlContext.Regression.Trainers.StochasticDualCoordinateAscent(labelColumnName: "Target", featureColumnName: "FeatureVector"));
+                .Append(mlContext.Regression.Trainers.Sdca(labelColumnName: "Target", featureColumnName: "FeatureVector"));
 
             // Step three. Fit the pipeline to the training data.
             var model = pipeline.Fit(trainData);
 
             // Read the test dataset.
-            var testData = mlContext.Data.LoadFromTextFile<AdultData>(testDataPath,
+            var testData = mlContext.Data.LoadFromTextFile<RegressionData>(testDataPath,
                 // Default separator is tab, but we need a semicolon.
                 separatorChar: ';'
 ,
@@ -119,20 +192,15 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
                 hasHeader: true);
 
             // Calculate metrics of the model on the test data.
-            var metrics = mlContext.Regression.Evaluate(model.Transform(testData), label: "Target");
+            var metrics = mlContext.Regression.Evaluate(model.Transform(testData), labelColumnName: "Target");
 
-            using (var stream = File.Create(modelPath))
-            {
-                // Saving and loading happens to 'dynamic' models.
-                mlContext.Model.Save(model, stream);
-            }
+            // Saving and loading happens to transformers. We save the input schema with this model.
+            mlContext.Model.Save(model, trainData.Schema, modelPath);
 
             // Potentially, the lines below can be in a different process altogether.
-
-            // When you load the model, it's a 'dynamic' transformer. 
-            ITransformer loadedModel;
-            using (var stream = File.OpenRead(modelPath))
-                loadedModel = mlContext.Model.Load(stream);
+            // When you load the model, it's a non-specific ITransformer. We also recover
+            // the original schema.
+            ITransformer loadedModel = mlContext.Model.Load(modelPath, out var schema);
         }
 
         [Fact]
@@ -144,7 +212,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Step one: read the data as an IDataView.
             //  Retrieve the training data.
@@ -165,13 +233,13 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
                 // Cache data in memory for steps after the cache check point stage.
                 .AppendCacheCheckpoint(mlContext)
                 // Use the multi-class SDCA model to predict the label using features.
-                .Append(mlContext.MulticlassClassification.Trainers.StochasticDualCoordinateAscent());
+                .Append(mlContext.MulticlassClassification.Trainers.SdcaMaximumEntropy());
 
             // Train the model.
             var trainedModel = pipeline.Fit(trainData);
 
             // Inspect the model parameters. 
-            var modelParameters = trainedModel.LastTransformer.Model as MulticlassLogisticRegressionModelParameters;
+            var modelParameters = trainedModel.LastTransformer.Model as MaximumEntropyModelParameters;
 
             // Get the weights and the numbers of classes
             VBuffer<float>[] weights = default;
@@ -193,7 +261,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
             // 		[2]	-9.709775	float
 
             // Apply the inverse conversion from 'PredictedLabel' column back to string value.
-            var finalPipeline = pipeline.Append(mlContext.Transforms.Conversion.MapKeyToValue(("Data", "PredictedLabel")));
+            var finalPipeline = pipeline.Append(mlContext.Transforms.Conversion.MapKeyToValue("Data", "PredictedLabel"));
             dataPreview = finalPipeline.Preview(trainData);
 
             return finalPipeline.Fit(trainData);
@@ -203,13 +271,13 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Use the model for one-time prediction.
             // Make the prediction function object. Note that, on average, this call takes around 200x longer
             // than one prediction, so you might want to cache and reuse the prediction function, instead of
             // creating one per prediction.
-            var predictionFunc = model.CreatePredictionEngine<IrisInput, IrisPrediction>(mlContext);
+            var predictionFunc = mlContext.Model.CreatePredictionEngine<IrisInput, IrisPrediction>(model);
 
             // Obtain the prediction. Remember that 'Predict' is not reentrant. If you want to use multiple threads
             // for simultaneous prediction, make sure each thread is using its own PredictionFunction.
@@ -230,7 +298,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Read the training data.
             var trainData = mlContext.Data.LoadFromTextFile<IrisInputAllFeatures>(dataPath,
@@ -241,9 +309,9 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
             // Apply all kinds of standard ML.NET normalization to the raw features.
             var pipeline =
                 mlContext.Transforms.Normalize(
-                    new NormalizingEstimator.MinMaxColumnOptions("MinMaxNormalized", "Features", fixZero: true),
-                    new NormalizingEstimator.MeanVarColumnOptions("MeanVarNormalized", "Features", fixZero: true),
-                    new NormalizingEstimator.BinningColumnOptions("BinNormalized", "Features", numBins: 256));
+                    new NormalizingEstimator.MinMaxColumnOptions("MinMaxNormalized", "Features", ensureZeroUntouched: true),
+                    new NormalizingEstimator.MeanVarianceColumnOptions("MeanVarNormalized", "Features", fixZero: true),
+                    new NormalizingEstimator.BinningColumnOptions("BinNormalized", "Features", maximumBinCount: 256));
 
             // Let's train our pipeline of normalizers, and then apply it to the same data.
             var normalizedData = pipeline.Fit(trainData).Transform(trainData);
@@ -255,6 +323,164 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         [Fact]
         public void Normalization()
             => NormalizationWorkout(GetDataPath("iris.data"));
+
+        [Fact]
+        public void GlobalFeatureImportance()
+        {
+            var dataPath = GetDataPath("housing.txt");
+
+            var context = new MLContext(1);
+
+            IDataView data = context.Data.LoadFromTextFile(dataPath, new[]
+            {
+                new TextLoader.Column("Label", DataKind.Single, 0),
+                new TextLoader.Column("CrimesPerCapita", DataKind.Single, 1),
+                new TextLoader.Column("PercentResidental", DataKind.Single, 2),
+                new TextLoader.Column("PercentNonRetail", DataKind.Single, 3),
+                new TextLoader.Column("CharlesRiver", DataKind.Single, 4),
+                new TextLoader.Column("NitricOxides", DataKind.Single, 5),
+                new TextLoader.Column("RoomsPerDwelling", DataKind.Single, 6),
+                new TextLoader.Column("PercentPre40s", DataKind.Single, 7),
+                new TextLoader.Column("EmploymentDistance", DataKind.Single, 8),
+                new TextLoader.Column("HighwayDistance", DataKind.Single, 9),
+                new TextLoader.Column("TaxRate", DataKind.Single, 10),
+                new TextLoader.Column("TeacherRatio", DataKind.Single, 11)
+            },
+            hasHeader: true);
+
+            var pipeline = context.Transforms.Concatenate("Features", "CrimesPerCapita", "PercentResidental", "PercentNonRetail", "CharlesRiver", "NitricOxides",
+                "RoomsPerDwelling", "PercentPre40s", "EmploymentDistance", "HighwayDistance", "TaxRate", "TeacherRatio")
+                .Append(context.Regression.Trainers.FastTree());
+
+            var model = pipeline.Fit(data);
+
+            var transformedData = model.Transform(data);
+
+            var featureImportance = context.Regression.PermutationFeatureImportance(model.LastTransformer, transformedData);
+
+            for (int i = 0; i < featureImportance.Count(); i++)
+            {
+                Console.WriteLine($"Feature {i}: Difference in RMS - {featureImportance[i].RootMeanSquaredError.Mean}");
+            }
+        }
+
+        [Fact]
+        public void GetLinearModelWeights()
+        {
+            var dataPath = GetDataPath("housing.txt");
+
+            var context = new MLContext(1);
+
+            IDataView data = context.Data.LoadFromTextFile(dataPath, new[]
+            {
+                new TextLoader.Column("Label", DataKind.Single, 0),
+                new TextLoader.Column("CrimesPerCapita", DataKind.Single, 1),
+                new TextLoader.Column("PercentResidental", DataKind.Single, 2),
+                new TextLoader.Column("PercentNonRetail", DataKind.Single, 3),
+                new TextLoader.Column("CharlesRiver", DataKind.Single, 4),
+                new TextLoader.Column("NitricOxides", DataKind.Single, 5),
+                new TextLoader.Column("RoomsPerDwelling", DataKind.Single, 6),
+                new TextLoader.Column("PercentPre40s", DataKind.Single, 7),
+                new TextLoader.Column("EmploymentDistance", DataKind.Single, 8),
+                new TextLoader.Column("HighwayDistance", DataKind.Single, 9),
+                new TextLoader.Column("TaxRate", DataKind.Single, 10),
+                new TextLoader.Column("TeacherRatio", DataKind.Single, 11)
+            },
+            hasHeader: true);
+
+            var pipeline = context.Transforms.Concatenate("Features", "CrimesPerCapita", "PercentResidental", "PercentNonRetail", "CharlesRiver", "NitricOxides",
+                "RoomsPerDwelling", "PercentPre40s", "EmploymentDistance", "HighwayDistance", "TaxRate", "TeacherRatio")
+                .Append(context.Regression.Trainers.Sdca());
+
+            var model = pipeline.Fit(data);
+
+            var linearModel = model.LastTransformer.Model;
+
+            var weights = linearModel.Weights; 
+        }
+
+        [Fact]
+        public void GetFastTreeModelWeights()
+        {
+            var dataPath = GetDataPath("housing.txt");
+
+            var context = new MLContext(1);
+
+            IDataView data = context.Data.LoadFromTextFile(dataPath, new[]
+            {
+                new TextLoader.Column("Label", DataKind.Single, 0),
+                new TextLoader.Column("CrimesPerCapita", DataKind.Single, 1),
+                new TextLoader.Column("PercentResidental", DataKind.Single, 2),
+                new TextLoader.Column("PercentNonRetail", DataKind.Single, 3),
+                new TextLoader.Column("CharlesRiver", DataKind.Single, 4),
+                new TextLoader.Column("NitricOxides", DataKind.Single, 5),
+                new TextLoader.Column("RoomsPerDwelling", DataKind.Single, 6),
+                new TextLoader.Column("PercentPre40s", DataKind.Single, 7),
+                new TextLoader.Column("EmploymentDistance", DataKind.Single, 8),
+                new TextLoader.Column("HighwayDistance", DataKind.Single, 9),
+                new TextLoader.Column("TaxRate", DataKind.Single, 10),
+                new TextLoader.Column("TeacherRatio", DataKind.Single, 11)
+            },
+            hasHeader: true);
+
+            var pipeline = context.Transforms.Concatenate("Features", "CrimesPerCapita", "PercentResidental", "PercentNonRetail", "CharlesRiver", "NitricOxides",
+                "RoomsPerDwelling", "PercentPre40s", "EmploymentDistance", "HighwayDistance", "TaxRate", "TeacherRatio")
+                .Append(context.Regression.Trainers.FastTree());
+
+            var model = pipeline.Fit(data);
+
+            var linearModel = model.LastTransformer.Model;
+
+            var weights = new VBuffer<float>();
+            linearModel.GetFeatureWeights(ref weights);
+        }
+
+        [Fact]
+        public void FeatureImportanceForEachRow()
+        {
+            var dataPath = GetDataPath("housing.txt");
+
+            var context = new MLContext(1);
+
+            IDataView data = context.Data.LoadFromTextFile(dataPath, new[]
+            {
+                new TextLoader.Column("MedianHomeValue", DataKind.Single, 0),
+                new TextLoader.Column("CrimesPerCapita", DataKind.Single, 1),
+                new TextLoader.Column("PercentResidental", DataKind.Single, 2),
+                new TextLoader.Column("PercentNonRetail", DataKind.Single, 3),
+                new TextLoader.Column("CharlesRiver", DataKind.Single, 4),
+                new TextLoader.Column("NitricOxides", DataKind.Single, 5),
+                new TextLoader.Column("RoomsPerDwelling", DataKind.Single, 6),
+                new TextLoader.Column("PercentPre40s", DataKind.Single, 7),
+                new TextLoader.Column("EmploymentDistance", DataKind.Single, 8),
+                new TextLoader.Column("HighwayDistance", DataKind.Single, 9),
+                new TextLoader.Column("TaxRate", DataKind.Single, 10),
+                new TextLoader.Column("TeacherRatio", DataKind.Single, 11)
+            },
+            hasHeader: true);
+
+            var pipeline = context.Transforms.Concatenate("Features", "CrimesPerCapita", "PercentResidental", "PercentNonRetail", "CharlesRiver", "NitricOxides",
+                "RoomsPerDwelling", "PercentPre40s", "EmploymentDistance", "HighwayDistance", "TaxRate", "TeacherRatio")
+                .Append(context.Regression.Trainers.FastTree(labelColumnName: "MedianHomeValue"));
+
+            var model = pipeline.Fit(data);
+
+            var transfomedData = model.Transform(data);
+
+            var linearModel = model.LastTransformer;
+
+            var featureContributionCalculation = context.Transforms.CalculateFeatureContribution(linearModel, normalize: false);
+
+            var featureContributionData = featureContributionCalculation.Fit(transfomedData).Transform(transfomedData);
+
+            var shuffledSubset = context.Data.TakeRows(context.Data.ShuffleRows(featureContributionData), 10);
+            var scoringEnumerator = context.Data.CreateEnumerable<HousingData>(shuffledSubset, true);
+
+            foreach (var row in scoringEnumerator)
+            {
+                Console.WriteLine(row);
+            }
+        }
 
         private IEnumerable<CustomerChurnInfo> GetChurnInfo()
         {
@@ -272,7 +498,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Define the loader: specify the data columns and where to find them in the text file.
             var loader = mlContext.Data.CreateTextLoader(new[]
@@ -298,23 +524,23 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
                 .Append(mlContext.Transforms.Text.NormalizeText("NormalizedMessage", "Message"))
 
                 // NLP pipeline 1: bag of words.
-                .Append(new WordBagEstimator(mlContext, "BagOfWords", "NormalizedMessage"))
+                .Append(mlContext.Transforms.Text.ProduceWordBags("BagOfWords", "NormalizedMessage"))
 
                 // NLP pipeline 2: bag of bigrams, using hashes instead of dictionary indices.
-                .Append(new WordHashBagEstimator(mlContext, "BagOfBigrams","NormalizedMessage", 
-                            ngramLength: 2, allLengths: false))
+                .Append(mlContext.Transforms.Text.ProduceHashedWordBags("BagOfBigrams","NormalizedMessage", 
+                            ngramLength: 2, useAllLengths: false))
 
                 // NLP pipeline 3: bag of tri-character sequences with TF-IDF weighting.
-                .Append(mlContext.Transforms.Text.TokenizeCharacters("MessageChars", "Message"))
-                .Append(new NgramExtractingEstimator(mlContext, "BagOfTrichar", "MessageChars", 
+                .Append(mlContext.Transforms.Text.TokenizeIntoCharactersAsKeys("MessageChars", "Message"))
+                .Append(mlContext.Transforms.Text.ProduceNgrams("BagOfTrichar", "MessageChars", 
                             ngramLength: 3, weighting: NgramExtractingEstimator.WeightingCriteria.TfIdf))
 
                 // NLP pipeline 4: word embeddings.
                 // PretrainedModelKind.Sswe is used here for performance of the test. In a real
                 // scenario, it is best to use a different model for more accuracy.
-                .Append(mlContext.Transforms.Text.TokenizeWords("TokenizedMessage", "NormalizedMessage"))
-                .Append(mlContext.Transforms.Text.ExtractWordEmbeddings("Embeddings", "TokenizedMessage",
-                            WordEmbeddingsExtractingEstimator.PretrainedModelKind.Sswe));
+                .Append(mlContext.Transforms.Text.TokenizeIntoWords("TokenizedMessage", "NormalizedMessage"))
+                .Append(mlContext.Transforms.Text.ApplyWordEmbedding("Embeddings", "TokenizedMessage",
+                            WordEmbeddingEstimator.PretrainedModelKind.SentimentSpecificWordEmbedding));
 
             // Let's train our pipeline, and then apply it to the same data.
             // Note that even on a small dataset of 70KB the pipeline above can take up to a minute to completely train.
@@ -341,7 +567,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Define the loader: specify the data columns and where to find them in the text file.
             var loader = mlContext.Data.CreateTextLoader(new[]
@@ -368,7 +594,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
                 // Convert each categorical feature into one-hot encoding independently.
                 mlContext.Transforms.Categorical.OneHotEncoding("CategoricalOneHot", "CategoricalFeatures")
                 // Convert all categorical features into indices, and build a 'word bag' of these.
-                .Append(mlContext.Transforms.Categorical.OneHotEncoding("CategoricalBag", "CategoricalFeatures", OneHotEncodingTransformer.OutputKind.Bag))
+                .Append(mlContext.Transforms.Categorical.OneHotEncoding("CategoricalBag", "CategoricalFeatures", OneHotEncodingEstimator.OutputKind.Bag))
                 // One-hot encode the workclass column, then drop all the categories that have fewer than 10 instances in the train set.
                 .Append(mlContext.Transforms.Categorical.OneHotEncoding("WorkclassOneHot", "Workclass"))
                 .Append(mlContext.Transforms.FeatureSelection.SelectFeaturesBasedOnCount("WorkclassOneHotTrimmed", "WorkclassOneHot", count: 10));
@@ -404,7 +630,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Step one: read the data as an IDataView.
             var data = mlContext.Data.LoadFromTextFile<IrisInput>(dataPath,
@@ -423,10 +649,10 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
                 // Notice that unused part in the data may not be cached.
                 .AppendCacheCheckpoint(mlContext)
                 // Use the multi-class SDCA model to predict the label using features.
-                .Append(mlContext.MulticlassClassification.Trainers.StochasticDualCoordinateAscent());
+                .Append(mlContext.MulticlassClassification.Trainers.SdcaMaximumEntropy());
 
             // Split the data 90:10 into train and test sets, train and evaluate.
-            var split = mlContext.MulticlassClassification.TrainTestSplit(data, testFraction: 0.1);
+            var split = mlContext.Data.TrainTestSplit(data, testFraction: 0.1);
 
             // Train the model.
             var model = pipeline.Fit(split.TrainSet);
@@ -435,7 +661,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
             Console.WriteLine(metrics.MicroAccuracy);
 
             // Now run the 5-fold cross-validation experiment, using the same pipeline.
-            var cvResults = mlContext.MulticlassClassification.CrossValidate(data, pipeline, numFolds: 5);
+            var cvResults = mlContext.MulticlassClassification.CrossValidate(data, pipeline, numberOfFolds: 5);
 
             // The results object is an array of 5 elements. For each of the 5 folds, we have metrics, model and scored test data.
             // Let's compute the average micro-accuracy.
@@ -453,10 +679,10 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         {
             // Create a new context for ML.NET operations. It can be used for exception tracking and logging, 
             // as a catalog of available operations and as the source of randomness.
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
 
             // Now read the file (remember though, loaders are lazy, so the actual reading will happen when the data is accessed).
-            var loader = mlContext.Data.LoadFromTextFile<AdultData>(dataPath,
+            var loader = mlContext.Data.LoadFromTextFile<RegressionData>(dataPath,
                 // Default separator is tab, but we need a comma.
                 separatorChar: ',');
         }
@@ -476,7 +702,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
         [Fact]
         public void CustomTransformer()
         {
-            var mlContext = new MLContext();
+            var mlContext = new MLContext(1);
             var data = mlContext.Data.LoadFromTextFile(GetDataPath("adult.tiny.with-schema.txt"), new[]
             {
                 new TextLoader.Column("Income", DataKind.Single, 10),
@@ -523,20 +749,17 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
             var model = estimator.Fit(cachedTrainData);
 
             // Save the model.
-            using (var fs = File.Create(modelPath))
-                mlContext.Model.Save(model, fs);
+            mlContext.Model.Save(model, cachedTrainData.Schema, modelPath);
 
             // Now pretend we are in a different process.
-            var newContext = new MLContext();
+            var newContext = new MLContext(1);
 
             // Register the assembly that contains 'CustomMappings' with the ComponentCatalog
             // so it can be found when loading the model.
             newContext.ComponentCatalog.RegisterAssembly(typeof(CustomMappings).Assembly);
 
             // Now we can load the model.
-            ITransformer loadedModel;
-            using (var fs = File.OpenRead(modelPath))
-                loadedModel = newContext.Model.Load(fs);
+            ITransformer loadedModel = newContext.Model.Load(modelPath, out var schema);
         }
 
         public static IDataView PrepareData(MLContext mlContext, IDataView data)
@@ -626,7 +849,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
             public float Features { get; set; }
         }
 
-        private class AdultData
+        private class RegressionData
         {
             [LoadColumn(0, 10), ColumnName("FeatureVector")]
             public float Features { get; set; }
@@ -635,5 +858,27 @@ namespace Microsoft.ML.Tests.Scenarios.Api.CookbookSamples
             public float Target { get; set; }
         }
 
+        private class HousingData
+        {
+            public float MedianHomeValue { get; set; }
+            public float CrimesPerCapita { get; set; }
+            public float PercentResidental { get; set; }
+            public float PercentNonRetail { get; set; }
+            public float CharlesRiver { get; set; }
+            public float NitricOxides { get; set; }
+            public float RoomsPerDwelling { get; set; }
+            public float PercentPre40s { get; set; }
+            public float EmploymentDistance { get; set; }
+            public float HighwayDistance { get; set; }
+            public float TaxRate { get; set; }
+            public float TeacherRatio { get; set; }
+        }
+
+        private class DataPoint
+        {
+            [VectorType(4)]
+            public float[] Features { get; set; }
+            public bool Label { get; set; }
+        }
     }
 }

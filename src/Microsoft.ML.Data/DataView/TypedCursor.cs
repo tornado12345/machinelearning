@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
 
@@ -129,7 +128,7 @@ namespace Microsoft.ML.Data
             var schema = _data.Schema;
             for (int i = 0; i < n; i++)
             {
-                if (_columns[i].ColumnType is VectorType)
+                if (_columns[i].ColumnType is VectorDataViewType)
                     _peeks[i] = ApiUtils.GeneratePeek<TypedCursorable<TRow>, TRow>(_columns[i]);
                 _pokes[i] = ApiUtils.GeneratePoke<TypedCursorable<TRow>, TRow>(_columns[i]);
             }
@@ -143,9 +142,9 @@ namespace Microsoft.ML.Data
         {
             InternalSchemaDefinition.GetVectorAndItemType(memberInfo, out bool isVector, out Type itemType);
             if (isVector)
-                return colType is VectorType vectorType && vectorType.ItemType.RawType == itemType;
+                return colType is VectorDataViewType vectorType && vectorType.ItemType.RawType == itemType;
             else
-                return !(colType is VectorType) && colType.RawType == itemType;
+                return !(colType is VectorDataViewType) && colType.RawType == itemType;
         }
 
         /// <summary>
@@ -218,6 +217,90 @@ namespace Microsoft.ML.Data
                  .ToArray();
         }
 
+        private static void ValidateMemberInfo(MemberInfo memberInfo, IDataView data)
+        {
+            if (!SchemaDefinition.NeedToCheckMemberInfo(memberInfo))
+                return;
+
+            var mappingNameAttr = memberInfo.GetCustomAttribute<ColumnNameAttribute>();
+            var singleName = mappingNameAttr?.Name ?? memberInfo.Name;
+
+            Type actualType = null;
+            bool isVector = false;
+            IEnumerable<Attribute> customAttributes = null;
+            switch (memberInfo)
+            {
+                case FieldInfo fieldInfo:
+                    InternalSchemaDefinition.GetMappedType(fieldInfo.FieldType, out actualType, out isVector);
+                    customAttributes = fieldInfo.GetCustomAttributes();
+                    break;
+
+                case PropertyInfo propertyInfo:
+                    InternalSchemaDefinition.GetMappedType(propertyInfo.PropertyType, out actualType, out isVector);
+                    customAttributes = propertyInfo.GetCustomAttributes();
+                    break;
+
+                default:
+                    Contracts.Assert(false);
+                    throw Contracts.ExceptNotSupp("Expected a FieldInfo or a PropertyInfo");
+            }
+
+            if (!actualType.TryGetDataKind(out _) && !DataViewTypeManager.Knows(actualType, customAttributes))
+            {
+                int colIndex;
+                data.Schema.TryGetColumnIndex(singleName, out colIndex);
+                DataViewType expectedType = data.Schema[colIndex].Type;
+                if (!actualType.Equals(expectedType.RawType))
+                    throw Contracts.ExceptParam(nameof(actualType), $"The expected type '{expectedType.RawType}' does not match the type of the '{singleName}' member: '{actualType}'. Please change the {singleName} member to '{expectedType.RawType}'");
+            }
+        }
+
+        private static void ValidateUserType(SchemaDefinition schemaDefinition, Type userType, IDataView data)
+        {
+            //Get memberInfos
+            MemberInfo[] memberInfos = null;
+            if (schemaDefinition == null)
+            {
+                memberInfos = SchemaDefinition.GetMemberInfos(userType, SchemaDefinition.Direction.Write);
+
+                if (memberInfos == null)
+                    return;
+
+                foreach (var memberInfo in memberInfos)
+                    ValidateMemberInfo(memberInfo, data);
+            }
+            else
+            {
+                for (int i = 0; i < schemaDefinition.Count; ++i)
+                {
+                    var col = schemaDefinition[i];
+                    if (col.MemberName == null)
+                        throw Contracts.ExceptParam(nameof(schemaDefinition), "Null field name detected in schema definition");
+
+                    MemberInfo memberInfo = null;
+                    // Infer the column name.
+                    var colName = string.IsNullOrEmpty(col.ColumnName) ? col.MemberName : col.ColumnName;
+
+                    if (col.Generator == null)
+                    {
+                        memberInfo = userType.GetField(col.MemberName);
+
+                        if (memberInfo == null)
+                            memberInfo = userType.GetProperty(col.MemberName);
+
+                        if ((memberInfo is FieldInfo && (memberInfo as FieldInfo).FieldType == typeof(IChannel)) ||
+                        (memberInfo is PropertyInfo && (memberInfo as PropertyInfo).PropertyType == typeof(IChannel)))
+                            continue;
+                    }
+                    else
+                    {
+                        memberInfo = col.ReturnType;
+                    }
+                    ValidateMemberInfo(memberInfo, data);
+                }
+            }
+        }
+
         /// <summary>
         /// Create a Cursorable object on a given data view.
         /// </summary>
@@ -231,6 +314,8 @@ namespace Microsoft.ML.Data
             Contracts.AssertValue(env);
             env.AssertValue(data);
             env.AssertValueOrNull(schemaDefinition);
+
+            ValidateUserType(schemaDefinition, typeof(TRow), data);
 
             var outSchema = schemaDefinition == null
                 ? InternalSchemaDefinition.Create(typeof(TRow), SchemaDefinition.Direction.Write)
@@ -276,7 +361,7 @@ namespace Microsoft.ML.Data
                 Func<DataViewRow, int, Delegate, Delegate, Action<TRow>> del;
                 if (fieldType.IsArray)
                 {
-                    Ch.Assert(colType is VectorType);
+                    Ch.Assert(colType is VectorDataViewType);
                     // VBuffer<ReadOnlyMemory<char>> -> String[]
                     if (fieldType.GetElementType() == typeof(string))
                     {
@@ -292,10 +377,10 @@ namespace Microsoft.ML.Data
                     del = CreateDirectVBufferSetter<int>;
                     genericType = fieldType.GetElementType();
                 }
-                else if (colType is VectorType vectorType)
+                else if (colType is VectorDataViewType vectorType)
                 {
                     // VBuffer<T> -> VBuffer<T>
-                    // REVIEW: Do we care about accomodating VBuffer<string> -> VBuffer<ReadOnlyMemory<char>>?
+                    // REVIEW: Do we care about accommodating VBuffer<string> -> VBuffer<ReadOnlyMemory<char>>?
                     Ch.Assert(fieldType.IsGenericType);
                     Ch.Assert(fieldType.GetGenericTypeDefinition() == typeof(VBuffer<>));
                     Ch.Assert(fieldType.GetGenericArguments()[0] == vectorType.ItemType.RawType);
@@ -318,6 +403,10 @@ namespace Microsoft.ML.Data
                     else
                         Ch.Assert(colType.RawType == fieldType);
 
+                    del = CreateDirectSetter<int>;
+                }
+                else if (DataViewTypeManager.Knows(colType))
+                {
                     del = CreateDirectSetter<int>;
                 }
                 else

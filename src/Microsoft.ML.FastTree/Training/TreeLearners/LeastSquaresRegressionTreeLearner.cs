@@ -69,6 +69,8 @@ namespace Microsoft.ML.Trainers.FastTree
         protected readonly bool FilterZeros;
         protected readonly double BsrMaxTreeOutput;
 
+        protected readonly IHost Host;
+
         // size of reserved memory
         private readonly long _sizeOfReservedMemory;
 
@@ -114,12 +116,13 @@ namespace Microsoft.ML.Trainers.FastTree
         /// <param name="bundling"></param>
         /// <param name="minDocsForCategoricalSplit"></param>
         /// <param name="bias"></param>
+        /// <param name="host">Host</param>
         public LeastSquaresRegressionTreeLearner(Dataset trainData, int numLeaves, int minDocsInLeaf, double entropyCoefficient,
             double featureFirstUsePenalty, double featureReusePenalty, double softmaxTemperature, int histogramPoolSize,
             int randomSeed, double splitFraction, bool filterZeros, bool allowEmptyTrees, double gainConfidenceLevel,
             int maxCategoricalGroupsPerNode, int maxCategoricalSplitPointPerNode,
             double bsrMaxTreeOutput, IParallelTraining parallelTraining, double minDocsPercentageForCategoricalSplit,
-            Bundle bundling, int minDocsForCategoricalSplit, double bias)
+            Bundle bundling, int minDocsForCategoricalSplit, double bias, IHost host)
             : base(trainData, numLeaves)
         {
             MinDocsInLeaf = minDocsInLeaf;
@@ -135,6 +138,7 @@ namespace Microsoft.ML.Trainers.FastTree
             MinDocsForCategoricalSplit = minDocsForCategoricalSplit;
             Bundling = bundling;
             Bias = bias;
+            Host = host;
 
             _calculateLeafSplitCandidates = ThreadTaskManager.MakeTask(
                 FindBestThresholdForFlockThreadWorker, TrainData.NumFlocks);
@@ -148,6 +152,7 @@ namespace Microsoft.ML.Trainers.FastTree
                 histogramPool[i] = new SufficientStatsBase[TrainData.NumFlocks];
                 for (int j = 0; j < TrainData.NumFlocks; j++)
                 {
+                    Host.CheckAlive();
                     var ss = histogramPool[i][j] = TrainData.Flocks[j].CreateSufficientStats(HasWeights);
                     _sizeOfReservedMemory += ss.SizeInBytes();
                 }
@@ -342,7 +347,7 @@ namespace Microsoft.ML.Trainers.FastTree
             using (Timer.Time(TimerEvent.FindBestSplit))
             using (Timer.Time(TimerEvent.FindBestSplitOfRoot))
             {
-                var smallSplitInit = Task.Factory.StartNew(() =>
+                var smallSplitInit = Task.Run(() =>
                 {
                     // Initialize.
                     using (Timer.Time(TimerEvent.FindBestSplitInit))
@@ -403,7 +408,7 @@ namespace Microsoft.ML.Trainers.FastTree
                 {
                     using (Timer.Time(TimerEvent.FindBestSplitInit))
                     {
-                        var smallSplitInit = Task.Factory.StartNew(() => SmallerChildSplitCandidates.Initialize(lteChild, partitioning, targets, GetTargetWeights(), FilterZeros));
+                        var smallSplitInit = Task.Run(() => SmallerChildSplitCandidates.Initialize(lteChild, partitioning, targets, GetTargetWeights(), FilterZeros));
                         LargerChildSplitCandidates.Initialize(gtChild, partitioning, targets, GetTargetWeights(), FilterZeros);
                         smallSplitInit.Wait();
                     }
@@ -416,7 +421,7 @@ namespace Microsoft.ML.Trainers.FastTree
                 {
                     using (Timer.Time(TimerEvent.FindBestSplitInit))
                     {
-                        var smallSplitInit = Task.Factory.StartNew(() => SmallerChildSplitCandidates.Initialize(gtChild, partitioning, targets, GetTargetWeights(), FilterZeros));
+                        var smallSplitInit = Task.Run(() => SmallerChildSplitCandidates.Initialize(gtChild, partitioning, targets, GetTargetWeights(), FilterZeros));
                         LargerChildSplitCandidates.Initialize(lteChild, partitioning, targets, GetTargetWeights(), FilterZeros);
                         smallSplitInit.Wait();
                     }
@@ -439,7 +444,7 @@ namespace Microsoft.ML.Trainers.FastTree
         /// <summary>
         /// After the gain for each feature has been computed, this function chooses the gain maximizing feature
         /// and sets its info in the right places
-        /// This method is overriden in MPI version of the code
+        /// This method is overridden in MPI version of the code
         /// </summary>
         /// <param name="leafSplitCandidates">the FindBestThesholdleafSplitCandidates data structure that contains the best split information</param>
         protected virtual void FindAndSetBestFeatureForLeaf(LeafSplitCandidates leafSplitCandidates)
@@ -498,6 +503,7 @@ namespace Microsoft.ML.Trainers.FastTree
         /// </summary>
         private void FindBestThresholdForFlockThreadWorker(int flock)
         {
+            Host.CheckAlive();
             int featureMin = TrainData.FlockToFirstFeature(flock);
             int featureLim = featureMin + TrainData.Flocks[flock].Count;
             // Check if any feature is active.
@@ -605,7 +611,7 @@ namespace Microsoft.ML.Trainers.FastTree
             {
                 if (BsrMaxTreeOutput < 0)
                     return (sumTargets * sumTargets) / count;
-                // For the BSR case, fall through to below with sweight
+                // For the BSR case, fall through to below with sumWeight
                 // receiving the "natural" weight.
                 sumWeights = count;
             }
@@ -649,6 +655,8 @@ namespace Microsoft.ML.Trainers.FastTree
         protected virtual void FindBestThresholdFromHistogram(SufficientStatsBase histogram,
             LeafSplitCandidates leafSplitCandidates, int flock)
         {
+            Host.CheckAlive();
+
             // Cache histograms for the parallel interface.
             int featureMin = TrainData.FlockToFirstFeature(flock);
             int featureLim = featureMin + TrainData.Flocks[flock].Count;
@@ -1011,7 +1019,7 @@ namespace Microsoft.ML.Trainers.FastTree
                             _sumTargets += target;
                             _docIndices[nonZeroCount] = i;
 
-                            // orignal code here: nonZeroCount++
+                            // original code here: nonZeroCount++
                             // is a bug and it will cause issue in next several lines of code,
                             // so we move it down to the end of if{} block.
                             if (Weights != null)

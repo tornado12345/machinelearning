@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Model.Pfa;
@@ -230,10 +229,12 @@ namespace Microsoft.ML.Data
                 if (isSrc)
                     return Input.GetGetter<TValue>(Input.Schema[index]);
 
-                Contracts.Assert(_getters[index] != null);
-                var fn = _getters[index] as ValueGetter<TValue>;
+                var originFn = _getters[index];
+                Contracts.Assert(originFn != null);
+                var fn = originFn as ValueGetter<TValue>;
                 if (fn == null)
-                    throw Contracts.Except("Invalid TValue in GetGetter: '{0}'", typeof(TValue));
+                    throw Contracts.Except($"Invalid TValue in GetGetter: '{typeof(TValue)}', " +
+                            $"expected type: '{originFn.GetType().GetGenericArguments().First()}'.");
                 return fn;
             }
 
@@ -255,7 +256,11 @@ namespace Microsoft.ML.Data
     /// Base class for transforms that operate row by row with each destination column using one
     /// source column. It provides an extension mechanism to allow a destination column to depend
     /// on multiple input columns.
-    /// This class provides the implementation of ISchema and IRowCursor.
+    /// The implementation of TransformBase's OutputSchema and GetRowCursorCore are found here.
+    /// Because of this, classes deriving from OneToOneTransformerBase do not need to worry about creating
+    /// a <see cref="DataViewSchema"/> or a <see cref="DataViewRowCursor"/>,
+    /// since <see cref="_bindings"/> has an AsSchema property which returns the schema, and the nested <see cref="Cursor"/> class
+    /// is used by all classes deriving from OneToOneTransformBase when getting the row cursor.
     /// </summary>
     [BestFriend]
     internal abstract class OneToOneTransformBase : RowToRowMapperTransformBase, ITransposeDataView, ITransformCanSavePfa,
@@ -270,9 +275,9 @@ namespace Microsoft.ML.Data
             public readonly string Name;
             public readonly int Source;
             public readonly DataViewType TypeSrc;
-            public readonly VectorType SlotTypeSrc;
+            public readonly VectorDataViewType SlotTypeSrc;
 
-            public ColInfo(string name, int colSrc, DataViewType typeSrc, VectorType slotTypeSrc)
+            public ColInfo(string name, int colSrc, DataViewType typeSrc, VectorDataViewType slotTypeSrc)
             {
                 Contracts.AssertNonEmpty(name);
                 Contracts.Assert(colSrc >= 0);
@@ -299,7 +304,7 @@ namespace Microsoft.ML.Data
             /// </summary>
             public readonly ColInfo[] Infos;
 
-            public VectorType GetSlotType(int col)
+            public VectorDataViewType GetSlotType(int col)
             {
                 var tidv = _parent.InputTranspose;
                 return tidv?.GetSlotType(col);
@@ -350,7 +355,7 @@ namespace Microsoft.ML.Data
                     }
 
                     var slotType = transposedInput?.GetSlotType(i);
-                    infos[i] = new ColInfo(names[i], colSrc, type, slotType as VectorType);
+                    infos[i] = new ColInfo(names[i], colSrc, type, slotType as VectorDataViewType);
                 }
 
                 return new Bindings(parent, infos, inputSchema, true, names);
@@ -398,7 +403,7 @@ namespace Microsoft.ML.Data
                             throw host.Except(InvalidTypeErrorFormat, src, type, reason);
                     }
                     var slotType = transposeInput?.GetSlotType(i);
-                    infos[i] = new ColInfo(dst, colSrc, type, slotType as VectorType);
+                    infos[i] = new ColInfo(dst, colSrc, type, slotType as VectorDataViewType);
                 }
 
                 return new Bindings(parent, infos, inputSchema, false, names);
@@ -469,6 +474,9 @@ namespace Microsoft.ML.Data
         private sealed class ColumnTmp : OneToOneColumn
         {
         }
+
+        private static readonly FuncInstanceMethodInfo1<OneToOneTransformBase, DataViewRow, int, Delegate> _getSrcGetterMethodInfo
+            = FuncInstanceMethodInfo1<OneToOneTransformBase, DataViewRow, int, Delegate>.Create(target => target.GetSrcGetter<int>);
 
         private readonly Bindings _bindings;
 
@@ -644,7 +652,7 @@ namespace Microsoft.ML.Data
 
         public sealed override DataViewSchema OutputSchema => _bindings.AsSchema;
 
-        VectorType ITransposeDataView.GetSlotType(int col) => _bindings.GetSlotType(col);
+        VectorDataViewType ITransposeDataView.GetSlotType(int col) => _bindings.GetSlotType(col);
 
         /// <summary>
         /// Return the (destination) column index for the indicated added column.
@@ -657,7 +665,7 @@ namespace Microsoft.ML.Data
 
         protected abstract DataViewType GetColumnTypeCore(int iinfo);
 
-        protected virtual VectorType GetSlotTypeCore(int iinfo)
+        protected virtual VectorDataViewType GetSlotTypeCore(int iinfo)
         {
             Host.Assert(0 <= iinfo && iinfo < Infos.Length);
             // By default, none of the added columns are transposable.
@@ -697,9 +705,7 @@ namespace Microsoft.ML.Data
             Host.CheckValue(typeDst, nameof(typeDst));
             Host.CheckValue(row, nameof(row));
 
-            Func<DataViewRow, int, ValueGetter<int>> del = GetSrcGetter<int>;
-            var methodInfo = del.GetMethodInfo().GetGenericMethodDefinition().MakeGenericMethod(typeDst.RawType);
-            return (Delegate)methodInfo.Invoke(this, new object[] { row, iinfo });
+            return Utils.MarshalInvoke(_getSrcGetterMethodInfo, this, typeDst.RawType, row, iinfo);
         }
 
         /// <summary>
@@ -897,10 +903,12 @@ namespace Microsoft.ML.Data
                 if (isSrc)
                     return Input.GetGetter<TValue>(Input.Schema[index]);
 
-                Ch.Assert(_getters[index] != null);
-                var fn = _getters[index] as ValueGetter<TValue>;
+                var originFn = _getters[index];
+                Ch.Assert(originFn != null);
+                var fn = originFn as ValueGetter<TValue>;
                 if (fn == null)
-                    throw Ch.Except("Invalid TValue in GetGetter: '{0}'", typeof(TValue));
+                    throw Ch.Except($"Invalid TValue in GetGetter: '{typeof(TValue)}', " +
+                            $"expected type: '{originFn.GetType().GetGenericArguments().First()}'.");
                 return fn;
             }
 
@@ -930,7 +938,7 @@ namespace Microsoft.ML.Data
 
         protected static string TestIsTextVector(DataViewType type)
         {
-            if (type is VectorType vectorType && vectorType.ItemType is TextDataViewType)
+            if (type is VectorDataViewType vectorType && vectorType.ItemType is TextDataViewType)
                 return null;
             return "Expected vector of Text type";
         }
@@ -939,12 +947,12 @@ namespace Microsoft.ML.Data
         {
             if (type.GetItemType() == NumberDataViewType.Single)
                 return null;
-            return "Expected R4 or a vector of R4";
+            return "Expected Single or a vector of Single";
         }
 
         protected static string TestIsFloatVector(DataViewType type)
         {
-            if (type is VectorType vectorType && vectorType.ItemType == NumberDataViewType.Single)
+            if (type is VectorDataViewType vectorType && vectorType.ItemType == NumberDataViewType.Single)
                 return null;
 
             return "Expected Float vector";
@@ -952,7 +960,7 @@ namespace Microsoft.ML.Data
 
         protected static string TestIsKnownSizeFloatVector(DataViewType type)
         {
-            if (type is VectorType vectorType
+            if (type is VectorDataViewType vectorType
                 && vectorType.IsKnownSize
                 && vectorType.ItemType == NumberDataViewType.Single)
                 return null;

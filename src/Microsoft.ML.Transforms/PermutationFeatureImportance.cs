@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Model;
@@ -16,6 +15,7 @@ using Microsoft.ML.Runtime;
 namespace Microsoft.ML.Transforms
 {
     internal static class PermutationFeatureImportance<TModel, TMetric, TResult> where TResult : IMetricsStatistics<TMetric>
+        where TModel : class
     {
         public static ImmutableArray<TResult>
             GetImportanceMetricsMatrix(
@@ -171,7 +171,7 @@ namespace Microsoft.ML.Transforms
                 int processedCnt = 0;
                 int nextFeatureIndex = 0;
                 var shuffleRand = RandomUtils.Create(host.Rand.Next());
-                using (var pch = host.StartProgressChannel("SDCA preprocessing with lookup"))
+                using (var pch = host.StartProgressChannel("Calculating Permutation Feature Importance"))
                 {
                     pch.SetHeader(new ProgressHeader("processed slots"), e => e.SetProgress(0, processedCnt));
                     foreach (var workingIndx in workingFeatureIndices)

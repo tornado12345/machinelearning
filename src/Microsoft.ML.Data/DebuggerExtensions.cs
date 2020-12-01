@@ -2,7 +2,6 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Transforms;
@@ -10,7 +9,8 @@ using Microsoft.ML.Transforms;
 namespace Microsoft.ML
 {
     /// <summary>
-    /// Static extensions for data preview.
+    /// Class used to create instances of preview objects for debugging.
+    /// Note: this class and all methods should only be used for debugging and not in production code.
     /// </summary>
     public static class DebuggerExtensions
     {
@@ -34,7 +34,7 @@ namespace Microsoft.ML
         /// <summary>
         /// Preview an effect of the <paramref name="estimator"/> on a given <paramref name="data"/>.
         /// </summary>
-        /// <param name="estimator">The estimnator which effect we are previewing</param>
+        /// <param name="estimator">The estimator which effect we are previewing</param>
         /// <param name="data">The data view to use for preview</param>
         /// <param name="maxRows">Maximum number of rows to show in preview</param>
         /// <param name="maxTrainingRows">Maximum number of rows to fit the estimator</param>

@@ -6,8 +6,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML.CommandLine;
+using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
 
 namespace Microsoft.ML.Data
@@ -19,6 +19,9 @@ namespace Microsoft.ML.Data
     /// </summary>
     internal abstract class RowToRowScorerBase : RowToRowMapperTransformBase, IDataScorerTransform
     {
+        private static readonly FuncStaticMethodInfo1<DataViewRow, int, Delegate> _getGetterFromRowMethodInfo
+            = new FuncStaticMethodInfo1<DataViewRow, int, Delegate>(GetGetterFromRow<int>);
+
         [BestFriend]
         private protected abstract class BindingsBase : ScorerBindingsBase
         {
@@ -88,7 +91,7 @@ namespace Microsoft.ML.Data
             Contracts.Assert(active.Length == bindings.ColumnCount);
 
             var activeInput = bindings.GetActiveInput(columns);
-            Contracts.Assert(activeInput.Count() == bindings.Input.Count);
+            Contracts.Assert(activeInput.Length == bindings.Input.Count);
 
             // Get a predicate that determines which Mapper outputs are active.
             var predicateMapper = bindings.GetActiveMapperColumns(active);
@@ -205,9 +208,7 @@ namespace Microsoft.ML.Data
             Contracts.Assert(row.IsColumnActive(row.Schema[col]));
 
             var type = row.Schema[col].Type;
-            Func<DataViewRow, int, ValueGetter<int>> del = GetGetterFromRow<int>;
-            var meth = del.GetMethodInfo().GetGenericMethodDefinition().MakeGenericMethod(type.RawType);
-            return (Delegate)meth.Invoke(null, new object[] { row, col });
+            return Utils.MarshalInvoke(_getGetterFromRowMethodInfo, type.RawType, row, col);
         }
 
         protected static ValueGetter<T> GetGetterFromRow<T>(DataViewRow output, int col)
@@ -299,7 +300,8 @@ namespace Microsoft.ML.Data
                 Ch.Assert(getter != null);
                 var fn = getter as ValueGetter<TValue>;
                 if (fn == null)
-                    throw Ch.Except("Invalid TValue in GetGetter: '{0}'", typeof(TValue));
+                    throw Ch.Except($"Invalid TValue in GetGetter: '{typeof(TValue)}', " +
+                            $"expected type: '{getter.GetType().GetGenericArguments().First()}'.");
                 return fn;
             }
         }

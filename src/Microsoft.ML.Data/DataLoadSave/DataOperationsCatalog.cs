@@ -3,7 +3,6 @@
 // See the LICENSE file in the project root for more information.
 
 using System.Collections.Generic;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
@@ -12,13 +11,38 @@ using Microsoft.ML.Transforms;
 namespace Microsoft.ML
 {
     /// <summary>
-    /// A catalog of operations over data that are not transformers or estimators.
-    /// This includes data loaders, saving, caching, filtering etc.
+    /// Class used to create components that operate on data, but are not part of the model training pipeline.
+    /// Includes components to load, save, cache, filter, shuffle, and split data.
     /// </summary>
     public sealed class DataOperationsCatalog : IInternalCatalog
     {
         IHostEnvironment IInternalCatalog.Environment => _env;
         private readonly IHostEnvironment _env;
+
+        /// <summary>
+        /// A pair of datasets, for the train and test set.
+        /// </summary>
+        public struct TrainTestData
+        {
+            /// <summary>
+            /// Training set.
+            /// </summary>
+            public readonly IDataView TrainSet;
+            /// <summary>
+            /// Testing set.
+            /// </summary>
+            public readonly IDataView TestSet;
+            /// <summary>
+            /// Create pair of datasets.
+            /// </summary>
+            /// <param name="trainSet">Training set.</param>
+            /// <param name="testSet">Testing set.</param>
+            internal TrainTestData(IDataView trainSet, IDataView testSet)
+            {
+                TrainSet = trainSet;
+                TestSet = testSet;
+            }
+        }
 
         internal DataOperationsCatalog(IHostEnvironment env)
         {
@@ -31,7 +55,7 @@ namespace Microsoft.ML
         /// The user maintains ownership of the <paramref name="data"/> and the resulting data view will
         /// never alter the contents of the <paramref name="data"/>.
         /// Since <see cref="IDataView"/> is assumed to be immutable, the user is expected to support
-        /// multiple enumeration of the <paramref name="data"/> that would return the same results, unless
+        /// multiple enumerations of the <paramref name="data"/> that would return the same results, unless
         /// the user knows that the data will only be cursored once.
         ///
         /// One typical usage for streaming data view could be: create the data view that lazily loads data
@@ -39,14 +63,14 @@ namespace Microsoft.ML
         /// results.
         /// </summary>
         /// <typeparam name="TRow">The user-defined item type.</typeparam>
-        /// <param name="data">The data to wrap around.</param>
+        /// <param name="data">The enumerable data containing type <typeparamref name="TRow"/> to convert to a <see cref="IDataView"/>.</param>
         /// <param name="schemaDefinition">The optional schema definition of the data view to create. If <c>null</c>,
         /// the schema definition is inferred from <typeparamref name="TRow"/>.</param>
         /// <returns>The constructed <see cref="IDataView"/>.</returns>
         /// <example>
         /// <format type="text/markdown">
         /// <![CDATA[
-        /// [!code-csharp[BootstrapSample](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/DataOperations/DataViewEnumerable.cs)]
+        /// [!code-csharp[LoadFromEnumerable](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/DataOperations/LoadFromEnumerable.cs)]
         /// ]]>
         /// </format>
         /// </example>
@@ -59,9 +83,36 @@ namespace Microsoft.ML
         }
 
         /// <summary>
+        /// Create a new <see cref="IDataView"/> over an enumerable of the items of user-defined type using the provided <see cref="DataViewSchema"/>,
+        /// which might contain more information about the schema than the type can capture.
+        /// </summary>
+        /// <remarks>
+        /// The user maintains ownership of the <paramref name="data"/> and the resulting data view will
+        /// never alter the contents of the <paramref name="data"/>.
+        /// Since <see cref="IDataView"/> is assumed to be immutable, the user is expected to support
+        /// multiple enumerations of the <paramref name="data"/> that would return the same results, unless
+        /// the user knows that the data will only be cursored once.
+        /// One typical usage for streaming data view could be: create the data view that lazily loads data
+        /// as needed, then apply pre-trained transformations to it and cursor through it for transformation
+        /// results.
+        /// One practical usage of this would be to supply the feature column names through the <see cref="DataViewSchema.Annotations"/>.
+        /// </remarks>
+        /// <typeparam name="TRow">The user-defined item type.</typeparam>
+        /// <param name="data">The enumerable data containing type <typeparamref name="TRow"/> to convert to an <see cref="IDataView"/>.</param>
+        /// <param name="schema">The schema of the returned <see cref="IDataView"/>.</param>
+        /// <returns>An <see cref="IDataView"/> with the given <paramref name="schema"/>.</returns>
+        public IDataView LoadFromEnumerable<TRow>(IEnumerable<TRow> data, DataViewSchema schema)
+            where TRow : class
+        {
+            _env.CheckValue(data, nameof(data));
+            _env.CheckValue(schema, nameof(schema));
+            return DataViewConstructionUtils.CreateFromEnumerable(_env, data, schema);
+        }
+
+        /// <summary>
         /// Convert an <see cref="IDataView"/> into a strongly-typed <see cref="IEnumerable{TRow}"/>.
         /// </summary>
-        /// <typeparam name="TRow">The user-defined row type.</typeparam>
+        /// <typeparam name="TRow">The user-defined item type.</typeparam>
         /// <param name="data">The underlying data view.</param>
         /// <param name="reuseRowObject">Whether to return the same object on every row, or allocate a new one per row.</param>
         /// <param name="ignoreMissingColumns">Whether to ignore the case when a requested column is not present in the data view.</param>
@@ -70,7 +121,7 @@ namespace Microsoft.ML
         /// <example>
         /// <format type="text/markdown">
         /// <![CDATA[
-        /// [!code-csharp[BootstrapSample](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/DataOperations/DataViewEnumerable.cs)]
+        /// [!code-csharp[CreateEnumerable](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/DataOperations/DataViewEnumerable.cs)]
         /// ]]>
         /// </format>
         /// </example>
@@ -115,7 +166,7 @@ namespace Microsoft.ML
                 _env,
                 input,
                 complement: complement,
-                seed: (uint?) seed,
+                seed: (uint?)seed,
                 shuffleInput: false,
                 poolSize: 0);
         }
@@ -183,7 +234,7 @@ namespace Microsoft.ML
         }
 
         /// <summary>
-        /// Filter the dataset by the values of a <see cref="KeyType"/> column.
+        /// Filter the dataset by the values of a <see cref="KeyDataViewType"/> column.
         /// </summary>
         /// <remarks>
         /// Keep only those rows that satisfy the range condition: the value of a key column <paramref name="columnName"/>
@@ -207,7 +258,7 @@ namespace Microsoft.ML
             _env.CheckValue(input, nameof(input));
             _env.CheckNonEmpty(columnName, nameof(columnName));
             _env.CheckParam(0 <= lowerBound && lowerBound <= 1, nameof(lowerBound), "Must be in [0, 1]");
-            _env.CheckParam(0 <= upperBound && upperBound <= 2, nameof(upperBound), "Must be in [0, 2]");
+            _env.CheckParam(0 <= upperBound && upperBound <= 1, nameof(upperBound), "Must be in [0, 1]");
             _env.CheckParam(lowerBound <= upperBound, nameof(upperBound), "Must be no less than lowerBound");
 
             var type = input.Schema[columnName].Type;
@@ -337,6 +388,205 @@ namespace Microsoft.ML
             };
 
             return new SkipTakeFilter(_env, options, input);
+        }
+
+        /// <summary>
+        /// Split the dataset into the train set and test set according to the given fraction.
+        /// Respects the <paramref name="samplingKeyColumnName"/> if provided.
+        /// </summary>
+        /// <param name="data">The dataset to split.</param>
+        /// <param name="testFraction">The fraction of data to go into the test set.</param>
+        /// <param name="samplingKeyColumnName">Name of a column to use for grouping rows. If two examples share the same value of the <paramref name="samplingKeyColumnName"/>,
+        /// they are guaranteed to appear in the same subset (train or test). This can be used to ensure no label leakage from the train to the test set.
+        /// Note that when performing a Ranking Experiment, the <paramref name="samplingKeyColumnName"/> must be the GroupId column.
+        /// If <see langword="null"/> no row grouping will be performed.</param>
+        /// <param name="seed">Seed for the random number generator used to select rows for the train-test split.</param>
+        /// <example>
+        /// <format type="text/markdown">
+        /// <![CDATA[
+        /// [!code-csharp[TrainTestSplit](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/DataOperations/TrainTestSplit.cs)]
+        /// ]]>
+        /// </format>
+        /// </example>
+        public TrainTestData TrainTestSplit(IDataView data, double testFraction = 0.1, string samplingKeyColumnName = null, int? seed = null)
+        {
+            _env.CheckValue(data, nameof(data));
+            _env.CheckParam(0 < testFraction && testFraction < 1, nameof(testFraction), "Must be between 0 and 1 exclusive");
+            _env.CheckValueOrNull(samplingKeyColumnName);
+
+            var splitColumn = CreateSplitColumn(_env, ref data, samplingKeyColumnName, seed, fallbackInEnvSeed: true);
+
+            var trainFilter = new RangeFilter(_env, new RangeFilter.Options()
+            {
+                Column = splitColumn,
+                Min = 0,
+                Max = testFraction,
+                Complement = true
+            }, data);
+            var testFilter = new RangeFilter(_env, new RangeFilter.Options()
+            {
+                Column = splitColumn,
+                Min = 0,
+                Max = testFraction,
+                Complement = false
+            }, data);
+
+            var trainDV = ColumnSelectingTransformer.CreateDrop(_env, trainFilter, splitColumn);
+            var testDV = ColumnSelectingTransformer.CreateDrop(_env, testFilter, splitColumn);
+
+            return new TrainTestData(trainDV, testDV);
+        }
+
+        /// <summary>
+        /// Split the dataset into cross-validation folds of train set and test set.
+        /// Respects the <paramref name="samplingKeyColumnName"/> if provided.
+        /// </summary>
+        /// <param name="data">The dataset to split.</param>
+        /// <param name="numberOfFolds">Number of cross-validation folds.</param>
+        /// <param name="samplingKeyColumnName">Name of a column to use for grouping rows. If two examples share the same value of the <paramref name="samplingKeyColumnName"/>,
+        /// they are guaranteed to appear in the same subset (train or test). This can be used to ensure no label leakage from the train to the test set.
+        /// Note that when performing a Ranking Experiment, the <paramref name="samplingKeyColumnName"/> must be the GroupId column.
+        /// If <see langword="null"/> no row grouping will be performed.</param>
+        /// <param name="seed">Seed for the random number generator used to select rows for cross-validation folds.</param>
+        /// <example>
+        /// <format type="text/markdown">
+        /// <![CDATA[
+        /// [!code-csharp[CrossValidationSplit](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/DataOperations/CrossValidationSplit.cs)]
+        /// ]]>
+        /// </format>
+        /// </example>
+        public IReadOnlyList<TrainTestData> CrossValidationSplit(IDataView data, int numberOfFolds = 5, string samplingKeyColumnName = null, int? seed = null)
+        {
+            _env.CheckValue(data, nameof(data));
+            _env.CheckParam(numberOfFolds > 1, nameof(numberOfFolds), "Must be more than 1");
+            _env.CheckValueOrNull(samplingKeyColumnName);
+            var splitColumn = CreateSplitColumn(_env, ref data, samplingKeyColumnName, seed, fallbackInEnvSeed: true);
+            var result = new List<TrainTestData>();
+            foreach (var split in CrossValidationSplit(_env, data, splitColumn, numberOfFolds))
+                result.Add(split);
+            return result;
+        }
+
+        /// <summary>
+        /// Splits the data based on the splitColumn, and drops that column as it is only
+        /// intended to be used for splitting the data, and shouldn't be part of the output schema.
+        /// </summary>
+        internal static IEnumerable<TrainTestData> CrossValidationSplit(IHostEnvironment env, IDataView data, string splitColumn, int numberOfFolds = 5)
+        {
+            env.CheckValue(splitColumn, nameof(splitColumn));
+
+            for (int fold = 0; fold < numberOfFolds; fold++)
+            {
+                var trainFilter = new RangeFilter(env, new RangeFilter.Options
+                {
+                    Column = splitColumn,
+                    Min = (double)fold / numberOfFolds,
+                    Max = (double)(fold + 1) / numberOfFolds,
+                    Complement=true,
+                    IncludeMin = true,
+                    IncludeMax = true,
+                }, data);
+
+                var testFilter = new RangeFilter(env, new RangeFilter.Options
+                {
+                    Column = splitColumn,
+                    Min = (double)fold / numberOfFolds,
+                    Max = (double)(fold + 1) / numberOfFolds,
+                    Complement = false,
+                    IncludeMin = true,
+                    IncludeMax = true
+                }, data);
+
+                var trainDV = ColumnSelectingTransformer.CreateDrop(env, trainFilter, splitColumn);
+                var testDV = ColumnSelectingTransformer.CreateDrop(env, testFilter, splitColumn);
+
+                yield return new TrainTestData(trainDV, testDV);
+            }
+        }
+
+        /// <summary>
+        /// Based on the input samplingKeyColumn creates a new splitColumn that will be used by the callers to apply a RangeFilter that will produce train-test splits
+        /// or cross-validation splits.
+        ///
+        /// Notice that the new splitColumn might get dropped by the callers of this method after using it, as it wasn't part of
+        /// the input DataView schema.
+        /// </summary>
+        /// <param name="env">IHostEnvironment of the caller</param>
+        /// <param name="data">DataView that should contain the "samplingKeyColumn". The new splitColumn will be added to this DataView.</param>
+        /// <param name="samplingKeyColumn">Name of the column that will be used as base of the new splitColumn.
+        /// Notice that in other places in the code the samplingKeyColumn, and/or the splitColumn this method creates,
+        /// are refered to as "SamplingKeyColumn", "StratificationColumn", "SplitColumn", "GroupPreservationColumn" or similar names. </param>
+        /// <param name="seed">The seed that might be used by the transformers that will create the new splitColumn</param>
+        /// <param name="fallbackInEnvSeed">If seed = null, then should we use the env seed? If seed = null, and this parameter is false, then we won't use a seed.</param>
+        /// <return>The name of the new column</return>
+        [BestFriend]
+        internal static string CreateSplitColumn(IHostEnvironment env, ref IDataView data, string samplingKeyColumn, int? seed = null, bool fallbackInEnvSeed = false)
+        {
+            Contracts.CheckValue(env, nameof(env));
+            Contracts.CheckValueOrNull(samplingKeyColumn);
+
+            var splitColumnName = data.Schema.GetTempColumnName("SplitColumn");
+            int? seedToUse;
+
+            if(seed.HasValue)
+            {
+                seedToUse = seed.Value;
+            }
+            else if(fallbackInEnvSeed)
+            {
+                ISeededEnvironment seededEnv = (ISeededEnvironment)env;
+                seedToUse = seededEnv.Seed;
+            }
+            else
+            {
+                seedToUse = null;
+            }
+
+            // We need to handle two cases: if samplingKeyColumn is not provided, we generate a random number.
+            if (samplingKeyColumn == null)
+            {
+                data = new GenerateNumberTransform(env, data, splitColumnName, (uint?)seedToUse);
+            }
+            else
+            {
+                // If samplingKeyColumn was provided we will make a new column based on it, but using a temporary
+                // name, as it might be dropped elsewhere in the code
+
+                if (!data.Schema.TryGetColumnIndex(samplingKeyColumn, out int samplingColIndex))
+                    throw env.ExceptSchemaMismatch(nameof(samplingKeyColumn), "SamplingKeyColumn", samplingKeyColumn);
+
+                var type = data.Schema[samplingColIndex].Type;
+                if (!RangeFilter.IsValidRangeFilterColumnType(env, type))
+                {
+                    var hashInputColumnName = samplingKeyColumn;
+                    // HashingEstimator currently handles all primitive types except for DateTime, DateTimeOffset and TimeSpan.
+                    var itemType = type.GetItemType();
+                    if (itemType is DateTimeDataViewType || itemType is DateTimeOffsetDataViewType || itemType is TimeSpanDataViewType)
+                    {
+                        data = new TypeConvertingTransformer(env, splitColumnName, DataKind.Int64, samplingKeyColumn).Transform(data);
+                        hashInputColumnName = splitColumnName;
+                    }
+
+                    var columnOptions =
+                        seedToUse.HasValue ?
+                        new HashingEstimator.ColumnOptions(splitColumnName, hashInputColumnName, 30, (uint)seedToUse.Value, combine: true) :
+                        new HashingEstimator.ColumnOptions(splitColumnName, hashInputColumnName, 30, combine: true);
+                    data = new HashingEstimator(env, columnOptions).Fit(data).Transform(data);
+                }
+                else
+                {
+                    if (type != NumberDataViewType.Single && type != NumberDataViewType.Double)
+                    {
+                        data = new ColumnCopyingEstimator(env, (splitColumnName, samplingKeyColumn)).Fit(data).Transform(data);
+                    }
+                    else
+                    {
+                        data = new NormalizingEstimator(env, new NormalizingEstimator.MinMaxColumnOptions(splitColumnName, samplingKeyColumn, ensureZeroUntouched: false)).Fit(data).Transform(data);
+                    }
+                }
+            }
+
+            return splitColumnName;
         }
     }
 }

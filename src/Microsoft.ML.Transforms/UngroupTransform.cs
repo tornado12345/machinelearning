@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -334,7 +333,7 @@ namespace Microsoft.ML.Transforms
                     int col;
                     if (!inputSchema.TryGetColumnIndex(name, out col))
                         throw ectx.ExceptUserArg(nameof(Options.Columns), "Pivot column '{0}' is not found", name);
-                    if (!(inputSchema[col].Type is VectorType colType))
+                    if (!(inputSchema[col].Type is VectorDataViewType colType))
                         throw ectx.ExceptUserArg(nameof(Options.Columns),
                             "Pivot column '{0}' has type '{1}', but must be a vector of primitive types", name, inputSchema[col].Type);
                     infos[i] = new PivotColumnOptions(name, col, colType.Size, colType.ItemType);
@@ -446,6 +445,9 @@ namespace Microsoft.ML.Transforms
 
         private sealed class Cursor : LinkedRootCursorBase
         {
+            private static readonly FuncInstanceMethodInfo1<Cursor, int, Func<int>> _makeSizeGetterMethodInfo
+                = FuncInstanceMethodInfo1<Cursor, int, Func<int>>.Create(target => target.MakeSizeGetter<int>);
+
             private readonly UngroupBinding _ungroupBinding;
 
             // The size of the pivot column in the current row. If the cursor is in good state, this is positive.
@@ -502,9 +504,7 @@ namespace Microsoft.ML.Transforms
                         // This will also create and cache a getter for the pivot column.
                         // That's why MakeSizeGetter is an instance method.
                         var rawItemType = info.ItemType.RawType;
-                        Func<int, Func<int>> del = MakeSizeGetter<int>;
-                        var mi = del.GetMethodInfo().GetGenericMethodDefinition().MakeGenericMethod(rawItemType);
-                        var sizeGetter = (Func<int>)mi.Invoke(this, new object[] { info.Index });
+                        var sizeGetter = Utils.MarshalInvoke(_makeSizeGetterMethodInfo, this, rawItemType, info.Index);
                         needed.Add(sizeGetter);
                     }
                 }
@@ -633,7 +633,7 @@ namespace Microsoft.ML.Transforms
                 // cachedIndex == row.Count || _pivotColPosition <= row.Indices[cachedIndex].
                 int cachedIndex = 0;
                 VBuffer<T> row = default(VBuffer<T>);
-                T naValue = Data.Conversion.Conversions.Instance.GetNAOrDefault<T>(itemType);
+                T naValue = Data.Conversion.Conversions.DefaultInstance.GetNAOrDefault<T>(itemType);
                 return
                     (ref T value) =>
                     {

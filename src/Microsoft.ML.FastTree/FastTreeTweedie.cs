@@ -5,12 +5,12 @@
 using System;
 using System.Linq;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.EntryPoints;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Model;
+using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Trainers.FastTree;
 
@@ -26,10 +26,40 @@ using Microsoft.ML.Trainers.FastTree;
 
 namespace Microsoft.ML.Trainers.FastTree
 {
-    // The Tweedie boosting model follows the mathematics established in:
-    // Yang, Quan, and Zou. "Insurance Premium Prediction via Gradient Tree-Boosted Tweedie Compound Poisson Models."
-    // https://arxiv.org/pdf/1508.06378.pdf
-    /// <include file='doc.xml' path='doc/members/member[@name="FastTreeTweedieRegression"]/*' />
+    /// <summary>
+    /// The <see cref="IEstimator{TTransformer}"/> for training a decision tree regression model using Tweedie loss function.
+    /// This trainer is a generalization of Poisson, compound Poisson, and gamma regression.
+    /// </summary>
+    /// <remarks>
+    /// <format type="text/markdown"><![CDATA[
+    /// To create this trainer, use [FastTreeTweedie](xref:Microsoft.ML.TreeExtensions.FastTreeTweedie(Microsoft.ML.RegressionCatalog.RegressionTrainers,System.String,System.String,System.String,System.Int32,System.Int32,System.Int32,System.Double))
+    /// or [FastTreeTweedie(Options)](xref:Microsoft.ML.TreeExtensions.FastTreeTweedie(Microsoft.ML.RegressionCatalog.RegressionTrainers,Microsoft.ML.Trainers.FastTree.FastTreeTweedieTrainer.Options)).
+    ///
+    /// [!include[io](~/../docs/samples/docs/api-reference/io-columns-regression.md)]
+    ///
+    /// ### Trainer Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Machine learning task | Regression |
+    /// | Is normalization required? | No |
+    /// | Is caching required? | No |
+    /// | Required NuGet in addition to Microsoft.ML | Microsoft.ML.FastTree |
+    /// | Exportable to ONNX | Yes |
+    ///
+    /// ### Training Algorithm Details
+    /// The Tweedie boosting model follows the mathematics established in
+    /// [Insurance Premium Prediction via Gradient Tree-Boosted Tweedie Compound Poisson Models</a> from Yang, Quan, and Zou](https://arxiv.org/pdf/1508.06378.pdf).
+    /// For an introduction to Gradient Boosting, and more information, see:
+    /// [Wikipedia: Gradient boosting(Gradient tree boosting)](https://en.wikipedia.org/wiki/Gradient_boosting#Gradient_tree_boosting) or
+    /// [Greedy function approximation: A gradient boosting machine](https://projecteuclid.org/DPubS?service=UI&amp;version=1.0&amp;verb=Display&amp;handle=euclid.aos/1013203451).
+    ///
+    /// Check the See Also section for links to usage examples.
+    /// ]]>
+    /// </format>
+    /// </remarks>
+    /// <seealso cref="TreeExtensions.FastTreeTweedie(RegressionCatalog.RegressionTrainers, string, string, string, int, int, int, double)"/>
+    /// <seealso cref="TreeExtensions.FastTreeTweedie(RegressionCatalog.RegressionTrainers, FastTreeTweedieTrainer.Options)"/>
+    /// <seealso cref="Options"/>
     public sealed partial class FastTreeTweedieTrainer
          : BoostingFastTreeTrainerBase<FastTreeTweedieTrainer.Options, RegressionPredictionTransformer<FastTreeTweedieModelParameters>, FastTreeTweedieModelParameters>
     {
@@ -210,7 +240,7 @@ namespace Microsoft.ML.Trainers.FastTree
 
             if (FastTreeTrainerOptions.PrintTestGraph)
             {
-                // If FirstTestHistory is null (which means the tests were not intialized due to /tf==infinity),
+                // If FirstTestHistory is null (which means the tests were not initialized due to /tf==infinity),
                 // we need initialize first set for graph printing.
                 // Adding to a tests would result in printing the results after final iteration.
                 if (_firstTestSetHistory == null)
@@ -292,7 +322,7 @@ namespace Microsoft.ML.Trainers.FastTree
 
             // We only print non-zero train&valid graph if earlyStoppingTruncation!=0.
             // In case /es is not set, we print 0 for train and valid graph NDCG.
-            // Let's keeping this behaviour for backward compatibility with previous FR version.
+            // Let's keeping this behavior for backward compatibility with previous FR version.
             // Ideally /graphtv should enforce non-zero /es in the commandline validation.
             if (_trainRegressionTest != null)
                 trainRegression = _trainRegressionTest.ComputeTests().Last().FinalValue;
@@ -451,7 +481,10 @@ namespace Microsoft.ML.Trainers.FastTree
         }
     }
 
-    public sealed class FastTreeTweedieModelParameters : TreeEnsembleModelParametersBasedOnRegressionTree
+    /// <summary>
+    /// Model parameters for <see cref="FastTreeTweedieTrainer"/>.
+    /// </summary>
+    public sealed class FastTreeTweedieModelParameters : TreeEnsembleModelParametersBasedOnRegressionTree, ISingleCanSaveOnnx
     {
         internal const string LoaderSignature = "FastTreeTweedieExec";
         internal const string RegistrationName = "FastTreeTweediePredictor";
@@ -491,12 +524,25 @@ namespace Microsoft.ML.Trainers.FastTree
             ctx.SetVersionInfo(GetVersionInfo());
         }
 
-        private static FastTreeTweedieModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
+        internal static FastTreeTweedieModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
         {
             Contracts.CheckValue(env, nameof(env));
             env.CheckValue(ctx, nameof(ctx));
             ctx.CheckAtModel(GetVersionInfo());
             return new FastTreeTweedieModelParameters(env, ctx);
+        }
+
+        bool ISingleCanSaveOnnx.SaveAsOnnx(OnnxContext ctx, string[] outputNames, string featureColumn)
+        {
+            const int minimumOpSetVersion = 9;
+            ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
+
+            // Mapping score to prediction
+            var fastTreeOutput = ctx.AddIntermediateVariable(null, "FastTreeOutput", true);
+            base.SaveAsOnnx(ctx, new[] { fastTreeOutput }, featureColumn);
+            var opType = "Exp";
+            ctx.CreateNode(opType, new[] { fastTreeOutput }, outputNames, ctx.GetNodeName(opType), "");
+            return true;
         }
 
         private protected override void Map(in VBuffer<float> src, ref float dst)

@@ -5,6 +5,7 @@
 using System.Linq;
 using Microsoft.ML.Data;
 using Microsoft.ML.RunTests;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Trainers;
 using Microsoft.ML.Transforms;
 using Xunit;
@@ -22,21 +23,21 @@ namespace Microsoft.ML.Tests.Scenarios.Api
         /// say, injecting a dummy label.
         /// </summary>
         [Fact]
-        void DecomposableTrainAndPredict()
+        public void DecomposableTrainAndPredict()
         {
             var dataPath = GetDataPath(TestDatasets.irisData.trainFilename);
-            var ml = new MLContext();
+            var ml = new MLContext(1);
 
             var data = ml.Data.LoadFromTextFile<IrisData>(dataPath, separatorChar: ',');
 
             var pipeline = new ColumnConcatenatingEstimator (ml, "Features", "SepalLength", "SepalWidth", "PetalLength", "PetalWidth")
                 .Append(new ValueToKeyMappingEstimator(ml, "Label"), TransformerScope.TrainTest)
-                .Append(ml.MulticlassClassification.Trainers.StochasticDualCoordinateAscent(
-                    new SdcaMultiClassTrainer.Options { MaximumNumberOfIterations = 100, Shuffle = true, NumberOfThreads = 1, }))
+                .Append(ml.MulticlassClassification.Trainers.SdcaMaximumEntropy(
+                    new SdcaMaximumEntropyMulticlassTrainer.Options { MaximumNumberOfIterations = 100, Shuffle = true, NumberOfThreads = 1, }))
                 .Append(new KeyToValueMappingEstimator(ml, "PredictedLabel"));
 
             var model = pipeline.Fit(data).GetModelFor(TransformerScope.Scoring);
-            var engine = model.CreatePredictionEngine<IrisDataNoLabel, IrisPrediction>(ml);
+            var engine = ml.Model.CreatePredictionEngine<IrisDataNoLabel, IrisPrediction>(model);
 
             var testLoader = ml.Data.LoadFromTextFile(dataPath, TestDatasets.irisData.GetLoaderColumns(), separatorChar: ',', hasHeader: true);
             var testData = ml.Data.CreateEnumerable<IrisData>(testLoader, false);

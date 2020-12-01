@@ -5,7 +5,6 @@
 using System;
 using System.IO;
 using System.Threading;
-using Microsoft.Data.DataView;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.CpuMath;
@@ -169,7 +168,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
         private protected SequentialAnomalyDetectionTransformBase(int windowSize, int initialWindowSize, string inputColumnName, string outputColumnName, string name, IHostEnvironment env,
             AnomalySide anomalySide, MartingaleType martingale, AlertingScore alertingScore, Double powerMartingaleEpsilon,
             Double alertThreshold)
-            : base(Contracts.CheckRef(env, nameof(env)).Register(name), windowSize, initialWindowSize, outputColumnName, inputColumnName, new VectorType(NumberDataViewType.Double, GetOutputLength(alertingScore, env)))
+            : base(Contracts.CheckRef(env, nameof(env)).Register(name), windowSize, initialWindowSize, outputColumnName, inputColumnName, new VectorDataViewType(NumberDataViewType.Double, GetOutputLength(alertingScore, env)))
         {
             Host.CheckUserArg(Enum.IsDefined(typeof(MartingaleType), martingale), nameof(ArgumentsBase.Martingale), "Value is undefined.");
             Host.CheckUserArg(Enum.IsDefined(typeof(AnomalySide), anomalySide), nameof(ArgumentsBase.Side), "Value is undefined.");
@@ -319,7 +318,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
 
                 var colType = inputSchema[_inputColumnIndex].Type;
                 if (colType != NumberDataViewType.Single)
-                    throw _host.ExceptSchemaMismatch(nameof(inputSchema), "input", parent.InputColumnName, "float", colType.ToString());
+                    throw _host.ExceptSchemaMismatch(nameof(inputSchema), "input", parent.InputColumnName, "Single", colType.ToString());
 
                 _parent = parent;
                 _parentSchema = inputSchema;
@@ -334,7 +333,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
                 var meta = new DataViewSchema.Annotations.Builder();
                 meta.AddSlotNames(_parent.OutputLength, GetSlotNames);
                 var info = new DataViewSchema.DetachedColumn[1];
-                info[0] = new DataViewSchema.DetachedColumn(_parent.OutputColumnName, new VectorType(NumberDataViewType.Double, _parent.OutputLength), meta.ToAnnotations());
+                info[0] = new DataViewSchema.DetachedColumn(_parent.OutputColumnName, new VectorDataViewType(NumberDataViewType.Double, _parent.OutputLength), meta.ToAnnotations());
                 return info;
             }
 
@@ -378,28 +377,31 @@ namespace Microsoft.ML.Transforms.TimeSeries
                 return valueGetter;
             }
 
-            public Action<long> CreatePinger(DataViewRow input, Func<int, bool> activeOutput, out Action disposer)
+            public Action<PingerArgument> CreatePinger(DataViewRow input, Func<int, bool> activeOutput, out Action disposer)
             {
                 disposer = null;
-                Action<long> pinger = null;
+                Action<PingerArgument> pinger = null;
                 if (activeOutput(0))
                     pinger = MakePinger(input, State);
 
                 return pinger;
             }
 
-                private Action<long> MakePinger(DataViewRow input, AnomalyDetectionStateBase state)
+            private Action<PingerArgument> MakePinger(DataViewRow input, AnomalyDetectionStateBase state)
+            {
+                _host.AssertValue(input);
+                var srcGetter = input.GetGetter<TInput>(input.Schema[_inputColumnIndex]);
+                Action<PingerArgument> pinger = (PingerArgument args) =>
                 {
-                    _host.AssertValue(input);
-                    var srcGetter = input.GetGetter<TInput>(input.Schema[_inputColumnIndex]);
-                    Action<long> pinger = (long rowPosition) =>
-                    {
-                        TInput src = default;
-                        srcGetter(ref src);
-                        state.UpdateState(ref src, rowPosition, _parent.WindowSize > 0);
-                    };
-                    return pinger;
-                }
+                    if (args.DontConsumeSource)
+                        return;
+
+                    TInput src = default;
+                    srcGetter(ref src);
+                    state.UpdateState(ref src, args.RowPosition, _parent.WindowSize > 0);
+                };
+                return pinger;
+            }
 
             public void CloneState()
             {
@@ -517,7 +519,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
                 dst = editor.Commit();
             }
 
-            private protected sealed override void TransformCore(ref TInput input, FixedSizeQueue<TInput> windowedBuffer, long iteration, ref VBuffer<Double> dst)
+            public sealed override void TransformCore(ref TInput input, FixedSizeQueue<TInput> windowedBuffer, long iteration, ref VBuffer<Double> dst)
             {
                 var outputLength = Parent.OutputLength;
                 Host.Assert(outputLength >= 2);

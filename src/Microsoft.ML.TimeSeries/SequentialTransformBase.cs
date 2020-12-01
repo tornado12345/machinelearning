@@ -4,7 +4,6 @@
 
 using System;
 using System.Collections.Generic;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Data.IO;
 using Microsoft.ML.Internal.Utilities;
@@ -27,6 +26,29 @@ namespace Microsoft.ML.Transforms.TimeSeries
         public DataBox(T value)
         {
             Value = value;
+        }
+    }
+
+    /// <summary>
+    /// The box class that is used to box the TInput and TOutput for the LambdaTransform.
+    /// This is for the case where there are three output columns.
+    /// </summary>
+    /// <typeparam name="T">The type to be boxed, e.g. TInput or TOutput</typeparam>
+    internal sealed class DataBoxForecastingWithConfidenceIntervals<T>
+    {
+        public T Forecast;
+        public T ConfidenceIntervalLowerBound;
+        public T ConfidenceIntervalUpperBound;
+
+        public DataBoxForecastingWithConfidenceIntervals()
+        {
+        }
+
+        public DataBoxForecastingWithConfidenceIntervals(T forecast, T confidenceIntervalLowerBound, T confidenceIntervalUpperBound)
+        {
+            Forecast = forecast;
+            ConfidenceIntervalLowerBound = confidenceIntervalLowerBound;
+            ConfidenceIntervalUpperBound = confidenceIntervalUpperBound;
         }
     }
 
@@ -196,7 +218,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
         /// <summary>
         /// The inner stateful Lambda Transform object.
         /// </summary>
-        private readonly IDataTransform _transform;
+        private readonly IDataView _transform;
 
         /// <summary>
         /// The window size for buffering.
@@ -211,7 +233,7 @@ namespace Microsoft.ML.Transforms.TimeSeries
         protected string InputColumnName;
         protected string OutputColumnName;
 
-        private static IDataTransform CreateLambdaTransform(IHost host, IDataView input, string outputColumnName, string inputColumnName,
+        private static IDataView CreateLambdaTransform(IHost host, IDataView input, string outputColumnName, string inputColumnName,
             Action<TState> initFunction, bool hasBuffer, DataViewType outputColTypeOverride)
         {
             var inputSchema = SchemaDefinition.Create(typeof(DataBox<TInput>));

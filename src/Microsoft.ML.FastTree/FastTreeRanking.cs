@@ -8,7 +8,6 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.EntryPoints;
@@ -39,7 +38,32 @@ using Microsoft.ML.Trainers.FastTree;
 
 namespace Microsoft.ML.Trainers.FastTree
 {
-    /// <include file='doc.xml' path='doc/members/member[@name="FastTree"]/*' />
+    /// <summary>
+    /// The <see cref="IEstimator{TTransformer}"/> for training a decision tree ranking model using FastTree.
+    /// </summary>
+    /// <remarks>
+    /// <format type="text/markdown"><![CDATA[
+    /// To create this trainer, use [FastTree](xref:Microsoft.ML.TreeExtensions.FastTree(Microsoft.ML.RankingCatalog.RankingTrainers,System.String,System.String,System.String,System.String,System.Int32,System.Int32,System.Int32,System.Double))
+    /// or [FastTree(Options)](xref:Microsoft.ML.TreeExtensions.FastTree(Microsoft.ML.RankingCatalog.RankingTrainers,Microsoft.ML.Trainers.FastTree.FastTreeRankingTrainer.Options)).
+    ///
+    /// [!include[io](~/../docs/samples/docs/api-reference/io-columns-ranking.md)]
+    ///
+    /// ### Trainer Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Machine learning task | Ranking |
+    /// | Is normalization required? | No |
+    /// | Is caching required? | No |
+    /// | Required NuGet in addition to Microsoft.ML | Microsoft.ML.FastTree |
+    /// | Exportable to ONNX | No |
+    ///
+    /// [!include[algorithm](~/../docs/samples/docs/api-reference/algo-details-fasttree.md)]
+    /// ]]>
+    /// </format>
+    /// </remarks>
+    /// <seealso cref="TreeExtensions.FastTree(RankingCatalog.RankingTrainers, string, string, string, string, int, int, int, double)"/>
+    /// <seealso cref="TreeExtensions.FastTree(RegressionCatalog.RegressionTrainers, FastTreeRegressionTrainer.Options)"/>
+    /// <seealso cref="Options"/>
     public sealed partial class FastTreeRankingTrainer
         : BoostingFastTreeTrainerBase<FastTreeRankingTrainer.Options, RankingPredictionTransformer<FastTreeRankingModelParameters>, FastTreeRankingModelParameters>
     {
@@ -98,13 +122,14 @@ namespace Microsoft.ML.Trainers.FastTree
             Contracts.Assert(labelCol.IsValid);
 
             Action error =
-                () => throw Host.ExceptSchemaMismatch(nameof(labelCol), "label", labelCol.Name, "float or KeyType", labelCol.GetTypeString());
+                () => throw Host.ExceptSchemaMismatch(nameof(labelCol), "label", labelCol.Name, "Single or Key", labelCol.GetTypeString());
 
             if (labelCol.Kind != SchemaShape.Column.VectorKind.Scalar)
                 error();
             if (!labelCol.IsKey && labelCol.ItemType != NumberDataViewType.Single)
                 error();
         }
+
         private protected override float GetMaxLabel()
         {
             return GetLabelGains().Length - 1;
@@ -217,7 +242,7 @@ namespace Microsoft.ML.Trainers.FastTree
 
             if (FastTreeTrainerOptions.PrintTestGraph)
             {
-                // If FirstTestHistory is null (which means the tests were not intialized due to /tf==infinity)
+                // If FirstTestHistory is null (which means the tests were not initialized due to /tf==infinity)
                 // We need initialize first set for graph printing
                 // Adding to a tests would result in printing the results after final iteration
                 if (_firstTestSetHistory == null)
@@ -515,13 +540,7 @@ namespace Microsoft.ML.Trainers.FastTree
 
             // Baseline risk.
             private static int _iteration = 0; // This is a static class global member which keeps track of the iterations.
-            private double[] _baselineDcg;
-            private double[] _baselineAlpha;
             private double _baselineAlphaCurrent;
-            // Current iteration risk statistics.
-            private double _idealNextRisk;
-            private double _currentRisk;
-            private double _countRisk;
 
             // These reusable buffers are used for
             // 1. preprocessing the scores for continuous cost function
@@ -619,7 +638,6 @@ namespace Microsoft.ML.Trainers.FastTree
 #if OLD_DATALOAD
             SetupSecondaryGains(cmd);
 #endif
-                SetupBaselineRisk(options);
                 _parallelTraining = parallelTraining;
             }
 
@@ -642,46 +660,6 @@ namespace Microsoft.ML.Trainers.FastTree
             }
         }
 #endif
-
-            private void SetupBaselineRisk(Options options)
-            {
-                double[] scores = Dataset.Skeleton.GetData<double>("BaselineScores");
-                if (scores == null)
-                    return;
-
-                // Calculate the DCG with the discounts as they exist in the objective function (this
-                // can differ versus the actual DCG discount)
-                DcgCalculator calc = new DcgCalculator(Dataset.MaxDocsPerQuery, options.SortingAlgorithm);
-                _baselineDcg = calc.DcgFromScores(Dataset, scores, _discount);
-
-                IniFileParserInterface ffi = IniFileParserInterface.CreateFromFreeform(string.IsNullOrEmpty(options.BaselineAlphaRisk) ? "0" : options.BaselineAlphaRisk);
-                IniFileParserInterface.FeatureEvaluator ffe = ffi.GetFeatureEvaluators()[0];
-                IniFileParserInterface.FeatureMap ffmap = ffi.GetFeatureMap();
-                string[] ffnames = Enumerable.Range(0, ffmap.RawFeatureCount)
-                    .Select(x => ffmap.GetRawFeatureName(x)).ToArray();
-                string[] badffnames = ffnames.Where(x => x != "I" && x != "T").ToArray();
-                if (badffnames.Length > 0)
-                {
-                    // The freeform should contain only I and T, that is, the iteration and total iterations.
-                    throw Contracts.Except(
-                        "alpha freeform must use only I (iterations) and T (total iterations), contains {0} unrecognized names {1}",
-                        badffnames.Length, string.Join(", ", badffnames));
-                }
-
-                uint[] vals = new uint[ffmap.RawFeatureCount];
-                int iInd = Array.IndexOf(ffnames, "I");
-                int tInd = Array.IndexOf(ffnames, "T");
-                int totalTrees = options.NumberOfTrees;
-                if (tInd >= 0)
-                    vals[tInd] = (uint)totalTrees;
-                _baselineAlpha = Enumerable.Range(0, totalTrees).Select(i =>
-                {
-                    if (iInd >= 0)
-                        vals[iInd] = (uint)i;
-                    return ffe.Evaluate(vals);
-                }).ToArray();
-            }
-
             private void FillSigmoidTable(double sigmoidParam)
             {
                 // minScore is such that 2*sigmoidParam*score is < expAsymptote if score < minScore
@@ -735,7 +713,7 @@ namespace Microsoft.ML.Trainers.FastTree
 
                     if (_groupIdToTopLabel[groupIndex] != -1)
                     {
-                        // this is the second+ occurance of a result
+                        // this is the second+ occurrence of a result
                         // of the same duplicate group, so:
                         // - disconsider when applying the cost function
                         //
@@ -757,17 +735,8 @@ namespace Microsoft.ML.Trainers.FastTree
 
             public override double[] GetGradient(IChannel ch, double[] scores)
             {
-                // Set the risk and alpha accumulators appropriately.
-                _countRisk = _currentRisk = _idealNextRisk = 0.0;
-                _baselineAlphaCurrent = _baselineAlpha == null ? 0.0 : _baselineAlpha[_iteration];
+                _baselineAlphaCurrent = 0.0;
                 double[] grads = base.GetGradient(ch, scores);
-                if (_baselineDcg != null)
-                {
-                    ch.Info(
-                        "Risk alpha {0:0.000}, total {1:0.000}, avg {2:0.000}, count {3}, next ideal {4:0.000}",
-                        _baselineAlphaCurrent, _currentRisk, _currentRisk / Math.Max(1.0, _countRisk),
-                        _countRisk, _idealNextRisk);
-                }
                 _iteration++;
                 return grads;
             }
@@ -828,19 +797,6 @@ namespace Microsoft.ML.Trainers.FastTree
                         PermutationSort(permutation, scoresToUse, labels, numDocuments, begin);
                         // Get how far about baseline our current
                         double baselineDcgGap = 0.0;
-                        if (_baselineDcg != null)
-                        {
-                            baselineDcgGap = _baselineDcg[query];
-                            for (int d = 0; d < numDocuments; ++d)
-                            {
-                                baselineDcgGap -= _gainLabels[pPermutation[d] + begin] * _discount[d];
-                            }
-                            if (baselineDcgGap > 1e-7)
-                            {
-                                Utils.InterlockedAdd(ref _currentRisk, baselineDcgGap);
-                                Utils.InterlockedAdd(ref _countRisk, 1.0);
-                            }
-                        }
                         //baselineDCGGap = ((new Random(query)).NextDouble() * 2 - 1)/inverseMaxDCG; // THIS IS EVIL CODE REMOVE LATER
                         // Keep track of top 3 labels for later use
                         GetTopQueryLabels(query, permutation, true);
@@ -869,7 +825,7 @@ namespace Microsoft.ML.Trainers.FastTree
                             }
                         }
 
-                        // Continous cost function and shifted NDCG require a re-sort and recomputation of maxDCG
+                        // Continuous cost function and shifted NDCG require a re-sort and recomputation of maxDCG
                         // (Change of scores in the former and scores and labels in the latter)
                         if (!_useDcg && (_costFunctionParam == 'c' || _useShiftedNdcg))
                         {
@@ -885,28 +841,6 @@ namespace Microsoft.ML.Trainers.FastTree
                                 pSigmoidTable, _minScore, _maxScore, _sigmoidTable.Length, _scoreToSigmoidTableFactor,
                                 _costFunctionParam, _distanceWeight2, numActualResults, &lambdaSum, double.MinValue,
                                 _baselineAlphaCurrent, baselineDcgGap);
-
-                        // For computing the "ideal" case of the DCGs.
-                        if (_baselineDcg != null)
-                        {
-                            if (scoresToUse == Scores)
-                                Array.Copy(Scores, begin, _scoresCopy, begin, numDocuments);
-                            for (int i = begin; i < begin + numDocuments; ++i)
-                            {
-                                _scoresCopy[i] += Gradient[i] / Weights[i];
-                            }
-                            Array.Copy(_oneTwoThree, permutation, numDocuments);
-                            PermutationSort(permutation, _scoresCopy, labels, numDocuments, begin);
-                            double idealNextRisk = _baselineDcg[query];
-                            for (int d = 0; d < numDocuments; ++d)
-                            {
-                                idealNextRisk -= _gainLabels[pPermutation[d] + begin] * _discount[d];
-                            }
-                            if (idealNextRisk > 1e-7)
-                            {
-                                Utils.InterlockedAdd(ref _idealNextRisk, idealNextRisk);
-                            }
-                        }
 
 #else
                         if (_useShiftedNdcg || _costFunctionParam == 'c' || _distanceWeight2 || _normalizeQueryLambdas)
@@ -1017,23 +951,6 @@ namespace Microsoft.ML.Trainers.FastTree
                     for (int d = 0; d < Dataset.MaxDocsPerQuery; ++d)
                         _discount[d] = 1.0 / Math.Log(2.0 + d);
                 }
-                else
-                {
-                    IniFileParserInterface inip = IniFileParserInterface.CreateFromFreeform(positionDiscountFreeform);
-                    if (inip.GetFeatureMap().RawFeatureCount != 1)
-                    {
-                        throw Contracts.Except(
-                            "The position discount freeform requires exactly 1 variable, {0} encountered",
-                            inip.GetFeatureMap().RawFeatureCount);
-                    }
-                    var freeformEval = inip.GetFeatureEvaluators()[0];
-                    uint[] p = new uint[1];
-                    for (int d = 0; d < Dataset.MaxDocsPerQuery; ++d)
-                    {
-                        p[0] = (uint)d;
-                        _discount[d] = freeformEval.Evaluate(p);
-                    }
-                }
             }
 
             private void FillGainLabels()
@@ -1101,6 +1018,9 @@ namespace Microsoft.ML.Trainers.FastTree
         }
     }
 
+    /// <summary>
+    /// Model parameters for <see cref="FastTreeRankingTrainer"/>.
+    /// </summary>
     public sealed class FastTreeRankingModelParameters : TreeEnsembleModelParametersBasedOnRegressionTree
     {
         internal const string LoaderSignature = "FastTreeRankerExec";
@@ -1143,7 +1063,7 @@ namespace Microsoft.ML.Trainers.FastTree
             ctx.SetVersionInfo(GetVersionInfo());
         }
 
-        private static FastTreeRankingModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
+        internal static FastTreeRankingModelParameters Create(IHostEnvironment env, ModelLoadContext ctx)
         {
             return new FastTreeRankingModelParameters(env, ctx);
         }

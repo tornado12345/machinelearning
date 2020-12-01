@@ -2,23 +2,25 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using System;
 using System.IO;
-using Microsoft.Data.DataView;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using Microsoft.ML;
 using Microsoft.ML.Data;
 using Microsoft.ML.Data.IO;
 using Microsoft.ML.Runtime;
 
-[assembly: LoadableClass(typeof(BinaryPredictionTransformer<IPredictorProducing<float>>), typeof(BinaryPredictionTransformer), null, typeof(SignatureLoadModel),
+[assembly: LoadableClass(typeof(ISingleFeaturePredictionTransformer<object>), typeof(BinaryPredictionTransformer), null, typeof(SignatureLoadModel),
     "", BinaryPredictionTransformer.LoaderSignature)]
 
-[assembly: LoadableClass(typeof(MulticlassPredictionTransformer<IPredictorProducing<VBuffer<float>>>), typeof(MulticlassPredictionTransformer), null, typeof(SignatureLoadModel),
+[assembly: LoadableClass(typeof(ISingleFeaturePredictionTransformer<object>), typeof(MulticlassPredictionTransformer), null, typeof(SignatureLoadModel),
     "", MulticlassPredictionTransformer.LoaderSignature)]
 
-[assembly: LoadableClass(typeof(RegressionPredictionTransformer<IPredictorProducing<float>>), typeof(RegressionPredictionTransformer), null, typeof(SignatureLoadModel),
+[assembly: LoadableClass(typeof(ISingleFeaturePredictionTransformer<object>), typeof(RegressionPredictionTransformer), null, typeof(SignatureLoadModel),
     "", RegressionPredictionTransformer.LoaderSignature)]
 
-[assembly: LoadableClass(typeof(RankingPredictionTransformer<IPredictorProducing<float>>), typeof(RankingPredictionTransformer), null, typeof(SignatureLoadModel),
+[assembly: LoadableClass(typeof(ISingleFeaturePredictionTransformer<object>), typeof(RankingPredictionTransformer), null, typeof(SignatureLoadModel),
     "", RankingPredictionTransformer.LoaderSignature)]
 
 [assembly: LoadableClass(typeof(AnomalyPredictionTransformer<IPredictorProducing<float>>), typeof(AnomalyPredictionTransformer), null, typeof(SignatureLoadModel),
@@ -29,12 +31,16 @@ using Microsoft.ML.Runtime;
 
 namespace Microsoft.ML.Data
 {
+    internal static class PredictionTransformerBase
+    {
+        internal const string DirModel = "Model";
+    }
 
     /// <summary>
     /// Base class for transformers with no feature column, or more than one feature columns.
     /// </summary>
     /// <typeparam name="TModel">The type of the model parameters used by this prediction transformer.</typeparam>
-    public abstract class PredictionTransformerBase<TModel> : IPredictionTransformer<TModel>
+    public abstract class PredictionTransformerBase<TModel> : IPredictionTransformer<TModel>, IDisposable
         where TModel : class
     {
         /// <summary>
@@ -45,7 +51,7 @@ namespace Microsoft.ML.Data
         private protected IPredictor ModelAsPredictor => (IPredictor)Model;
 
         [BestFriend]
-        private protected const string DirModel = "Model";
+        private protected const string DirModel = PredictionTransformerBase.DirModel;
         [BestFriend]
         private protected const string DirTransSchema = "TrainSchema";
         [BestFriend]
@@ -53,7 +59,7 @@ namespace Microsoft.ML.Data
         [BestFriend]
         private protected ISchemaBindableMapper BindableMapper;
         [BestFriend]
-        private protected DataViewSchema TrainSchema;
+        internal DataViewSchema TrainSchema;
 
         /// <summary>
         /// Whether a call to <see cref="ITransformer.GetRowToRowMapper(DataViewSchema)"/> should succeed, on an
@@ -92,11 +98,26 @@ namespace Microsoft.ML.Data
 
             // *** Binary format ***
             // model: prediction model.
-            // stream: empty data view that contains train schema.
-            // id of string: feature column.
 
             ctx.LoadModel<TModel, SignatureLoadModel>(host, out TModel model, DirModel);
             Model = model;
+
+            InitializeLogic(host, ctx);
+        }
+
+        [BestFriend]
+        private protected PredictionTransformerBase(IHost host, ModelLoadContext ctx, TModel model)
+        {
+            Host = host;
+            Model = model; // prediction model
+            InitializeLogic(host, ctx);
+        }
+
+        private void InitializeLogic(IHost host, ModelLoadContext ctx)
+        {
+            // *** Binary format ***
+            // stream: empty data view that contains train schema.
+            // id of string: feature column.
 
             // Clone the stream with the schema into memory.
             var ms = new MemoryStream();
@@ -160,6 +181,22 @@ namespace Microsoft.ML.Data
                 }
             });
         }
+
+        #region IDisposable Support
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+
+            (Model as IDisposable)?.Dispose();
+            (BindableMapper as IDisposable)?.Dispose();
+            (Scorer as IDisposable)?.Dispose();
+
+            _disposed = true;
+        }
+        #endregion
     }
 
     /// <summary>
@@ -173,7 +210,7 @@ namespace Microsoft.ML.Data
         /// <summary>
         /// The name of the feature column used by the prediction transformer.
         /// </summary>
-        public string FeatureColumn { get; }
+        public string FeatureColumnName { get; }
 
         /// <summary>
         /// The type of the prediction transformer
@@ -190,7 +227,7 @@ namespace Microsoft.ML.Data
         private protected SingleFeaturePredictionTransformerBase(IHost host, TModel model, DataViewSchema trainSchema, string featureColumn)
             : base(host, model, trainSchema)
         {
-            FeatureColumn = featureColumn;
+            FeatureColumnName = featureColumn;
             if (featureColumn == null)
                 FeatureColumnType = null;
             else if (!trainSchema.TryGetColumnIndex(featureColumn, out int col))
@@ -204,12 +241,27 @@ namespace Microsoft.ML.Data
         private protected SingleFeaturePredictionTransformerBase(IHost host, ModelLoadContext ctx)
             : base(host, ctx)
         {
-            FeatureColumn = ctx.LoadStringOrNull();
+            FeatureColumnName = ctx.LoadStringOrNull();
 
-            if (FeatureColumn == null)
+            if (FeatureColumnName == null)
                 FeatureColumnType = null;
-            else if (!TrainSchema.TryGetColumnIndex(FeatureColumn, out int col))
-                throw Host.ExceptSchemaMismatch(nameof(FeatureColumn), "feature", FeatureColumn);
+            else if (!TrainSchema.TryGetColumnIndex(FeatureColumnName, out int col))
+                throw Host.ExceptSchemaMismatch(nameof(FeatureColumnName), "feature", FeatureColumnName);
+            else
+                FeatureColumnType = TrainSchema[col].Type;
+
+            BindableMapper = ScoreUtils.GetSchemaBindableMapper(Host, ModelAsPredictor);
+        }
+
+        private protected SingleFeaturePredictionTransformerBase(IHost host, ModelLoadContext ctx, TModel model)
+            : base(host, ctx, model)
+        {
+            FeatureColumnName = ctx.LoadStringOrNull();
+
+            if (FeatureColumnName == null)
+                FeatureColumnType = null;
+            else if (!TrainSchema.TryGetColumnIndex(FeatureColumnName, out int col))
+                throw Host.ExceptSchemaMismatch(nameof(FeatureColumnName), "feature", FeatureColumnName);
             else
                 FeatureColumnType = TrainSchema[col].Type;
 
@@ -225,12 +277,12 @@ namespace Microsoft.ML.Data
         {
             Host.CheckValue(inputSchema, nameof(inputSchema));
 
-            if (FeatureColumn != null)
+            if (FeatureColumnName != null)
             {
-                if (!inputSchema.TryGetColumnIndex(FeatureColumn, out int col))
-                    throw Host.ExceptSchemaMismatch(nameof(inputSchema), "feature", FeatureColumn);
+                if (!inputSchema.TryGetColumnIndex(FeatureColumnName, out int col))
+                    throw Host.ExceptSchemaMismatch(nameof(inputSchema), "feature", FeatureColumnName);
                 if (!inputSchema[col].Type.Equals(FeatureColumnType))
-                    throw Host.ExceptSchemaMismatch(nameof(inputSchema), "feature", FeatureColumn, FeatureColumnType.ToString(), inputSchema[col].Type.ToString());
+                    throw Host.ExceptSchemaMismatch(nameof(inputSchema), "feature", FeatureColumnName, FeatureColumnType.ToString(), inputSchema[col].Type.ToString());
             }
 
             return Transform(new EmptyDataView(Host, inputSchema)).Schema;
@@ -246,12 +298,12 @@ namespace Microsoft.ML.Data
         private protected virtual void SaveCore(ModelSaveContext ctx)
         {
             SaveModelCore(ctx);
-            ctx.SaveStringOrNull(FeatureColumn);
+            ctx.SaveStringOrNull(FeatureColumnName);
         }
 
         private protected GenericScorer GetGenericScorer()
         {
-            var schema = new RoleMappedSchema(TrainSchema, null, FeatureColumn);
+            var schema = new RoleMappedSchema(TrainSchema, null, FeatureColumnName);
             return new GenericScorer(Host, new GenericScorer.Arguments(), new EmptyDataView(Host, TrainSchema), BindableMapper.Bind(Host, schema), schema);
         }
     }
@@ -268,8 +320,8 @@ namespace Microsoft.ML.Data
 
         [BestFriend]
         internal AnomalyPredictionTransformer(IHostEnvironment env, TModel model, DataViewSchema inputSchema, string featureColumn,
-            float threshold = 0f, string thresholdColumn = DefaultColumnNames.Score)
-            : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(AnomalyPredictionTransformer<TModel>)),model, inputSchema, featureColumn)
+            float threshold = 0.5f, string thresholdColumn = DefaultColumnNames.Score)
+            : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(AnomalyPredictionTransformer<TModel>)), model, inputSchema, featureColumn)
         {
             Host.CheckNonEmpty(thresholdColumn, nameof(thresholdColumn));
             Threshold = threshold;
@@ -293,7 +345,7 @@ namespace Microsoft.ML.Data
 
         private void SetScorer()
         {
-            var schema = new RoleMappedSchema(TrainSchema, null, FeatureColumn);
+            var schema = new RoleMappedSchema(TrainSchema, null, FeatureColumnName);
             var args = new BinaryClassifierScorer.Arguments { Threshold = Threshold, ThresholdColumn = ThresholdColumn };
             Scorer = new BinaryClassifierScorer(Host, args, new EmptyDataView(Host, TrainSchema), BindableMapper.Bind(Host, schema), schema);
         }
@@ -334,6 +386,7 @@ namespace Microsoft.ML.Data
     {
         internal readonly string ThresholdColumn;
         internal readonly float Threshold;
+        internal readonly string LabelColumnName;
 
         [BestFriend]
         internal BinaryPredictionTransformer(IHostEnvironment env, TModel model, DataViewSchema inputSchema, string featureColumn,
@@ -347,22 +400,44 @@ namespace Microsoft.ML.Data
             SetScorer();
         }
 
+        internal BinaryPredictionTransformer(IHostEnvironment env, TModel model, DataViewSchema inputSchema, string featureColumn, string labelColumn,
+            float threshold = 0f, string thresholdColumn = DefaultColumnNames.Score)
+            : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(BinaryPredictionTransformer<TModel>)), model, inputSchema, featureColumn)
+        {
+            Host.CheckNonEmpty(thresholdColumn, nameof(thresholdColumn));
+            Threshold = threshold;
+            ThresholdColumn = thresholdColumn;
+            LabelColumnName = labelColumn;
+
+            SetScorer();
+        }
         internal BinaryPredictionTransformer(IHostEnvironment env, ModelLoadContext ctx)
             : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(BinaryPredictionTransformer<TModel>)), ctx)
+        {
+            InitializationLogic(ctx, out Threshold, out ThresholdColumn);
+        }
+
+        internal BinaryPredictionTransformer(IHostEnvironment env, ModelLoadContext ctx, IHost host, TModel model)
+            : base(host, ctx, model)
+        {
+            InitializationLogic(ctx, out Threshold, out ThresholdColumn);
+        }
+
+        private void InitializationLogic(ModelLoadContext ctx, out float threshold, out string thresholdcolumn)
         {
             // *** Binary format ***
             // <base info>
             // float: scorer threshold
             // id of string: scorer threshold column
 
-            Threshold = ctx.Reader.ReadSingle();
-            ThresholdColumn = ctx.LoadString();
+            threshold = ctx.Reader.ReadSingle();
+            thresholdcolumn = ctx.LoadString();
             SetScorer();
         }
 
         private void SetScorer()
         {
-            var schema = new RoleMappedSchema(TrainSchema, null, FeatureColumn);
+            var schema = new RoleMappedSchema(TrainSchema, LabelColumnName, FeatureColumnName);
             var args = new BinaryClassifierScorer.Arguments { Threshold = Threshold, ThresholdColumn = ThresholdColumn };
             Scorer = new BinaryClassifierScorer(Host, args, new EmptyDataView(Host, TrainSchema), BindableMapper.Bind(Host, schema), schema);
         }
@@ -402,33 +477,61 @@ namespace Microsoft.ML.Data
         where TModel : class
     {
         private readonly string _trainLabelColumn;
+        private readonly string _scoreColumn;
+        private readonly string _predictedLabelColumn;
 
         [BestFriend]
-        internal MulticlassPredictionTransformer(IHostEnvironment env, TModel model, DataViewSchema inputSchema, string featureColumn, string labelColumn)
-            : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(MulticlassPredictionTransformer<TModel>)), model, inputSchema, featureColumn)
+        internal MulticlassPredictionTransformer(IHostEnvironment env, TModel model, DataViewSchema inputSchema, string featureColumn, string labelColumn,
+            string scoreColumn = AnnotationUtils.Const.ScoreValueKind.Score, string predictedLabel = DefaultColumnNames.PredictedLabel) :
+            base(Contracts.CheckRef(env, nameof(env)).Register(nameof(MulticlassPredictionTransformer<TModel>)), model, inputSchema, featureColumn)
         {
             Host.CheckValueOrNull(labelColumn);
 
             _trainLabelColumn = labelColumn;
+            _scoreColumn = scoreColumn;
+            _predictedLabelColumn = predictedLabel;
             SetScorer();
         }
 
         internal MulticlassPredictionTransformer(IHostEnvironment env, ModelLoadContext ctx)
             : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(MulticlassPredictionTransformer<TModel>)), ctx)
         {
+            InitializationLogic(ctx, out _trainLabelColumn, out _scoreColumn, out _predictedLabelColumn);
+        }
+
+        internal MulticlassPredictionTransformer(IHostEnvironment env, ModelLoadContext ctx, IHost host, TModel model)
+            : base(host, ctx, model)
+        {
+
+            InitializationLogic(ctx, out _trainLabelColumn, out _scoreColumn, out _predictedLabelColumn);
+        }
+
+        private void InitializationLogic(ModelLoadContext ctx, out string trainLabelColumn, out string scoreColumn, out string predictedLabelColumn)
+        {
             // *** Binary format ***
             // <base info>
             // id of string: train label column
 
-            _trainLabelColumn = ctx.LoadStringOrNull();
+            trainLabelColumn = ctx.LoadStringOrNull();
+            if (ctx.Header.ModelVerWritten >= 0x00010002)
+            {
+                scoreColumn = ctx.LoadStringOrNull();
+                predictedLabelColumn = ctx.LoadStringOrNull();
+            }
+            else
+            {
+                scoreColumn = AnnotationUtils.Const.ScoreValueKind.Score;
+                predictedLabelColumn = DefaultColumnNames.PredictedLabel;
+            }
+
             SetScorer();
         }
 
         private void SetScorer()
         {
-            var schema = new RoleMappedSchema(TrainSchema, _trainLabelColumn, FeatureColumn);
-            var args = new MultiClassClassifierScorer.Arguments();
-            Scorer = new MultiClassClassifierScorer(Host, args, new EmptyDataView(Host, TrainSchema), BindableMapper.Bind(Host, schema), schema);
+            var schema = new RoleMappedSchema(TrainSchema, _trainLabelColumn, FeatureColumnName);
+            var args = new MulticlassClassificationScorer.Arguments() { ScoreColumnName = _scoreColumn, PredictedLabelColumnName = _predictedLabelColumn};
+            Scorer = new MulticlassClassificationScorer(Host, args, new EmptyDataView(Host, TrainSchema), BindableMapper.Bind(Host, schema), schema);
         }
 
         private protected override void SaveCore(ModelSaveContext ctx)
@@ -442,13 +545,16 @@ namespace Microsoft.ML.Data
             base.SaveCore(ctx);
 
             ctx.SaveStringOrNull(_trainLabelColumn);
+            ctx.SaveStringOrNull(_scoreColumn);
+            ctx.SaveStringOrNull(_predictedLabelColumn);
         }
 
         private static VersionInfo GetVersionInfo()
         {
             return new VersionInfo(
                 modelSignature: "MC  PRED",
-                verWrittenCur: 0x00010001, // Initial
+                //verWrittenCur: 0x00010001, // Initial
+                verWrittenCur: 0x00010002, // Score and Predicted Label column names.
                 verReadableCur: 0x00010001,
                 verWeCanReadBack: 0x00010001,
                 loaderSignature: MulticlassPredictionTransformer.LoaderSignature,
@@ -472,6 +578,12 @@ namespace Microsoft.ML.Data
 
         internal RegressionPredictionTransformer(IHostEnvironment env, ModelLoadContext ctx)
             : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(RegressionPredictionTransformer<TModel>)), ctx)
+        {
+            Scorer = GetGenericScorer();
+        }
+
+        internal RegressionPredictionTransformer(IHostEnvironment env, ModelLoadContext ctx, IHost host, TModel model)
+            : base(host, ctx, model)
         {
             Scorer = GetGenericScorer();
         }
@@ -514,6 +626,12 @@ namespace Microsoft.ML.Data
 
         internal RankingPredictionTransformer(IHostEnvironment env, ModelLoadContext ctx)
             : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(RankingPredictionTransformer<TModel>)), ctx)
+        {
+            Scorer = GetGenericScorer();
+        }
+
+        internal RankingPredictionTransformer(IHostEnvironment env, ModelLoadContext ctx, IHost host, TModel model)
+            : base(host, ctx, model)
         {
             Scorer = GetGenericScorer();
         }
@@ -565,7 +683,7 @@ namespace Microsoft.ML.Data
             // *** Binary format ***
             // <base info>
 
-            var schema = new RoleMappedSchema(TrainSchema, null, FeatureColumn);
+            var schema = new RoleMappedSchema(TrainSchema, null, FeatureColumnName);
             var args = new ClusteringScorer.Arguments();
             Scorer = new ClusteringScorer(Host, args, new EmptyDataView(Host, TrainSchema), BindableMapper.Bind(Host, schema), schema);
         }
@@ -596,33 +714,144 @@ namespace Microsoft.ML.Data
     internal static class BinaryPredictionTransformer
     {
         public const string LoaderSignature = "BinaryPredXfer";
+        private const string DirModel = PredictionTransformerBase.DirModel;
 
-        public static BinaryPredictionTransformer<IPredictorProducing<float>> Create(IHostEnvironment env, ModelLoadContext ctx)
-            => new BinaryPredictionTransformer<IPredictorProducing<float>>(env, ctx);
+        public static ISingleFeaturePredictionTransformer<object> Create(IHostEnvironment env, ModelLoadContext ctx)
+        {
+            // Load internal model
+            var host = Contracts.CheckRef(env, nameof(env)).Register(nameof(BinaryPredictionTransformer<IPredictorProducing<float>>));
+            ctx.LoadModel<IPredictorProducing<float>, SignatureLoadModel>(host, out IPredictorProducing<float> model, DirModel);
+
+            // Returns prediction transformer using the right TModel from the previously loaded model
+            Type predictionTransformerType = typeof(BinaryPredictionTransformer<>);
+            return (ISingleFeaturePredictionTransformer<object>) CreatePredictionTransformer.Create(env, ctx, host, model, predictionTransformerType);
+        }
     }
 
     internal static class MulticlassPredictionTransformer
     {
         public const string LoaderSignature = "MulticlassPredXfer";
+        private const string DirModel = PredictionTransformerBase.DirModel;
 
-        public static MulticlassPredictionTransformer<IPredictorProducing<VBuffer<float>>> Create(IHostEnvironment env, ModelLoadContext ctx)
-            => new MulticlassPredictionTransformer<IPredictorProducing<VBuffer<float>>>(env, ctx);
+        public static ISingleFeaturePredictionTransformer<object> Create(IHostEnvironment env, ModelLoadContext ctx)
+        {
+            // Load internal model
+            var host = Contracts.CheckRef(env, nameof(env)).Register(nameof(MulticlassPredictionTransformer<IPredictorProducing<VBuffer<float>>>));
+            ctx.LoadModel<IPredictorProducing<VBuffer<float>>, SignatureLoadModel>(host, out IPredictorProducing<VBuffer<float>> model, DirModel);
+
+            // Returns prediction transformer using the right TModel from the previously loaded model
+            Type predictionTransformerType = typeof(MulticlassPredictionTransformer<>);
+            return (ISingleFeaturePredictionTransformer<object>) CreatePredictionTransformer.Create(env, ctx, host, model, predictionTransformerType);
+        }
     }
 
     internal static class RegressionPredictionTransformer
     {
         public const string LoaderSignature = "RegressionPredXfer";
+        private const string DirModel = PredictionTransformerBase.DirModel;
 
-        public static RegressionPredictionTransformer<IPredictorProducing<float>> Create(IHostEnvironment env, ModelLoadContext ctx)
-            => new RegressionPredictionTransformer<IPredictorProducing<float>>(env, ctx);
+        public static ISingleFeaturePredictionTransformer<object> Create(IHostEnvironment env, ModelLoadContext ctx)
+        {
+            // Load internal model
+            var host = Contracts.CheckRef(env, nameof(env)).Register(nameof(RegressionPredictionTransformer<IPredictorProducing<float>>));
+            ctx.LoadModel<IPredictorProducing<float>, SignatureLoadModel>(host, out IPredictorProducing<float> model, DirModel);
+
+            // Returns prediction transformer using the right TModel from the previously loaded model
+            Type predictionTransformerType = typeof(RegressionPredictionTransformer<>);
+            return (ISingleFeaturePredictionTransformer<object>) CreatePredictionTransformer.Create(env, ctx, host, model, predictionTransformerType);
+
+        }
     }
 
     internal static class RankingPredictionTransformer
     {
         public const string LoaderSignature = "RankingPredXfer";
+        private const string DirModel = PredictionTransformerBase.DirModel;
 
-        public static RankingPredictionTransformer<IPredictorProducing<float>> Create(IHostEnvironment env, ModelLoadContext ctx)
-            => new RankingPredictionTransformer<IPredictorProducing<float>>(env, ctx);
+        public static ISingleFeaturePredictionTransformer<object> Create(IHostEnvironment env, ModelLoadContext ctx)
+        {
+            // Load internal model
+            var host = Contracts.CheckRef(env, nameof(env)).Register(nameof(RankingPredictionTransformer<IPredictorProducing<float>>));
+            ctx.LoadModel<IPredictorProducing<float>, SignatureLoadModel>(host, out IPredictorProducing<float> model, DirModel);
+
+            // Returns prediction transformer using the right TModel from the previously loaded model
+            Type predictionTransformerType = typeof(RankingPredictionTransformer<>);
+            return (ISingleFeaturePredictionTransformer<object>) CreatePredictionTransformer.Create(env, ctx, host, model, predictionTransformerType);
+        }
+    }
+
+    internal static class CreatePredictionTransformer
+    {
+        internal static object Create(IHostEnvironment env, ModelLoadContext ctx, IHost host, IPredictorProducing<float> model, Type predictionTransformerType)
+        {
+            // Create generic type of the prediction transformer using the correct TModel.
+            // Return an instance of that type, passing the previously loaded model to the constructor
+
+            var genericCtor = CreateConstructor(model.GetType(), predictionTransformerType);
+            var genericInstance = genericCtor.Invoke(new object[] { env, ctx, host, model });
+
+            return genericInstance;
+        }
+
+        internal static object Create(IHostEnvironment env, ModelLoadContext ctx, IHost host, IPredictorProducing<VBuffer<float>> model, Type predictionTransformerType)
+        {
+            // Create generic type of the prediction transformer using the correct TModel.
+            // Return an instance of that type, passing the previously loaded model to the constructor
+
+            var genericCtor = CreateConstructor(model.GetType(), predictionTransformerType);
+            var genericInstance = genericCtor.Invoke(new object[] { env, ctx, host, model });
+
+            return genericInstance;
+        }
+
+        private static ConstructorInfo CreateConstructor(Type modelType, Type predictionTransformerType)
+        {
+            Type modelLoadType = GetLoadType(modelType);
+            Type[] genericTypeArgs = { modelLoadType };
+            Type constructedType = predictionTransformerType.MakeGenericType(genericTypeArgs);
+
+            Type[] constructorArgs = {
+                typeof(IHostEnvironment),
+                typeof(ModelLoadContext),
+                typeof(IHost),
+                modelLoadType
+            };
+
+            var genericCtor = constructedType.GetConstructor(BindingFlags.NonPublic | BindingFlags.Instance, null, constructorArgs, null);
+            return genericCtor;
+        }
+
+        private static Type GetLoadType(Type modelType)
+        {
+            // Returns the type that should be assigned as TModel of the Prediction Transformer being loaded
+            var att = modelType.GetCustomAttribute(typeof(PredictionTransformerLoadTypeAttribute)) as PredictionTransformerLoadTypeAttribute;
+            if (att != null)
+            {
+                if (att.LoadType.IsGenericType && att.LoadType.GetGenericArguments().Length == modelType.GetGenericArguments().Length)
+                {
+                    // This assumes that if att.LoadType and modelType have the same number of type parameters
+                    // Then they should get the same type parameters.
+                    // This is the case for CalibratedModelParametersBase and its children generic clases.
+                    // But might break if other classes begin using the PredictionTransformerLoadTypeAttribute in the future.
+                    Type[] typeArguments = modelType.GetGenericArguments();
+                    Type genericType = att.LoadType;
+                    return genericType.MakeGenericType(typeArguments);
+                }
+            }
+
+            return modelType;
+        }
+    }
+
+    [AttributeUsage(AttributeTargets.Class)]
+    internal class PredictionTransformerLoadTypeAttribute : Attribute
+    {
+        internal Type LoadType { get; }
+        internal PredictionTransformerLoadTypeAttribute(Type loadtype)
+        {
+            LoadType = loadtype;
+        }
+
     }
 
     internal static class AnomalyPredictionTransformer

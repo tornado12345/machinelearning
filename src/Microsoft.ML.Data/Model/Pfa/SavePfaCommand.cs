@@ -5,7 +5,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.Command;
 using Microsoft.ML.CommandLine;
@@ -131,7 +130,7 @@ namespace Microsoft.ML.Model.Pfa
                 rawPred = null;
                 trainSchema = null;
                 Host.CheckUserArg(ImplOptions.LoadPredictor != true, nameof(ImplOptions.LoadPredictor),
-                    "Cannot be set to true unless " + nameof(ImplOptions.InputModelFile) + " is also specifified.");
+                    "Cannot be set to true unless " + nameof(ImplOptions.InputModelFile) + " is also specified.");
             }
             else
                 LoadModelObjects(ch, _loadPredictor, out rawPred, true, out trainSchema, out loader);

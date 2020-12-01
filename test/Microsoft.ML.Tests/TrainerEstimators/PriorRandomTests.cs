@@ -2,9 +2,9 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.RunTests;
+using Microsoft.ML.TestFrameworkCommon;
 using Xunit;
 
 namespace Microsoft.ML.Tests.TrainerEstimators
@@ -16,10 +16,10 @@ namespace Microsoft.ML.Tests.TrainerEstimators
             return new TextLoader(Env,
                     new TextLoader.Options()
                     {
-                        HasHeader = true,
+                        HasHeader = false,
                         Columns = new[]
                         {
-                            new TextLoader.Column("Label", DataKind.Single, 0),
+                            new TextLoader.Column("Label", DataKind.Boolean, 0),
                             new TextLoader.Column("F1", DataKind.String, 1),
                             new TextLoader.Column("F2", DataKind.Int32, 2),
                             new TextLoader.Column("Rest", DataKind.Single, new [] { new TextLoader.Range(3, 9) })

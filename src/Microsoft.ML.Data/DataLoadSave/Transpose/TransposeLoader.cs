@@ -9,7 +9,6 @@ using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -36,7 +35,7 @@ namespace Microsoft.ML.Data.IO
     {
         public sealed class Arguments
         {
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "The number of worker decompressor threads to use", ShortName = "t")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "The number of worker decompresser threads to use", ShortName = "t")]
             public int? Threads;
         }
 
@@ -296,7 +295,7 @@ namespace Microsoft.ML.Data.IO
                     var schema = view.Schema;
                     Host.CheckDecode(schema.Count == 1);
                     var ttype = schema[0].Type;
-                    VectorType vectorType = ttype as VectorType;
+                    VectorDataViewType vectorType = ttype as VectorDataViewType;
                     if (vectorType == null)
                         throw Host.ExceptDecode();
                     // We have no way to encode a type of zero length vectors per se in the case
@@ -317,6 +316,9 @@ namespace Microsoft.ML.Data.IO
                 }
             }
         }
+
+        private static readonly FuncInstanceMethodInfo1<TransposeLoader, DataViewRowCursor, SlotCursor> _getSlotCursorCoreMethodInfo
+            = FuncInstanceMethodInfo1<TransposeLoader, DataViewRowCursor, SlotCursor>.Create(target => target.GetSlotCursorCore<int>);
 
         // Positive if explicit, otherwise let the sub-binary loader decide for themselves.
         private readonly int _threads;
@@ -606,10 +608,10 @@ namespace Microsoft.ML.Data.IO
             return header;
         }
 
-        VectorType ITransposeDataView.GetSlotType(int col)
+        VectorDataViewType ITransposeDataView.GetSlotType(int col)
         {
             var view = _entries[col].GetViewOrNull();
-            return view.Schema[0].Type as VectorType;
+            return view.Schema[0].Type as VectorDataViewType;
         }
 
         public long? GetRowCount()
@@ -648,7 +650,7 @@ namespace Microsoft.ML.Data.IO
             DataViewRowCursor inputCursor = view.GetRowCursorForAllColumns();
             try
             {
-                return Utils.MarshalInvoke(GetSlotCursorCore<int>, cursorType.RawType, inputCursor);
+                return Utils.MarshalInvoke(_getSlotCursorCoreMethodInfo, this, cursorType.RawType, inputCursor);
             }
             catch (Exception)
             {
@@ -678,20 +680,21 @@ namespace Microsoft.ML.Data.IO
                 Ch.AssertValue(cursor);
                 Ch.Assert(cursor.Schema.Count == 1);
                 Ch.Assert(cursor.Schema[0].Type.RawType == typeof(VBuffer<T>));
-                Ch.Assert(cursor.Schema[0].Type is VectorType);
+                Ch.Assert(cursor.Schema[0].Type is VectorDataViewType);
                 _rowCursor = cursor;
 
                 _getter = _rowCursor.GetGetter<VBuffer<T>>(cursor.Schema[0]);
             }
 
-            public override VectorType GetSlotType()
-                => (VectorType)_rowCursor.Schema[0].Type;
+            public override VectorDataViewType GetSlotType()
+                => (VectorDataViewType)_rowCursor.Schema[0].Type;
 
             public override ValueGetter<VBuffer<TValue>> GetGetter<TValue>()
             {
                 ValueGetter<VBuffer<TValue>> getter = _getter as ValueGetter<VBuffer<TValue>>;
                 if (getter == null)
-                    throw Ch.Except("Invalid TValue: '{0}'", typeof(TValue));
+                    throw Ch.Except($"Invalid TValue: '{typeof(TValue)}', " +
+                        $"expected type: '{_getter.GetType().GetGenericArguments().First().GetGenericArguments().First()}'.");
                 return getter;
             }
 
@@ -796,7 +799,7 @@ namespace Microsoft.ML.Data.IO
                 Ch.Assert(((ITransposeDataView)_parent).GetSlotType(col).Size == _parent._header.RowCount);
                 Action<int> func = InitOne<int>;
                 DataViewType itemType = type;
-                if (type is VectorType vectorType)
+                if (type is VectorDataViewType vectorType)
                 {
                     func = InitVec<int>;
                     itemType = vectorType.ItemType;
@@ -828,7 +831,7 @@ namespace Microsoft.ML.Data.IO
             private void InitVec<T>(int col)
             {
                 var type = Schema[col].Type;
-                Ch.Assert(type is VectorType);
+                Ch.Assert(type is VectorDataViewType);
                 Ch.Assert(typeof(T) == type.GetItemType().RawType);
                 var trans = _parent.EnsureAndGetTransposer(col);
                 SlotCursor cursor = trans.GetSlotCursor(0);
@@ -881,9 +884,11 @@ namespace Microsoft.ML.Data.IO
                 Ch.CheckParam(column.Index <= _colToActivesIndex.Length && IsColumnActive(column), nameof(column), "requested column not active");
                 Ch.AssertValue(_getters[_colToActivesIndex[column.Index]]);
 
-                var getter = _getters[_colToActivesIndex[column.Index]] as ValueGetter<TValue>;
+                var originGetter = _getters[_colToActivesIndex[column.Index]];
+                var getter = originGetter as ValueGetter<TValue>;
                 if (getter == null)
-                    throw Ch.Except("Invalid TValue: '{0}'", typeof(TValue));
+                    throw Ch.Except($"Invalid TValue: '{typeof(TValue)}', " +
+                        $"expected type: '{originGetter.GetType().GetGenericArguments().First()}'.");
                 return getter;
             }
         }

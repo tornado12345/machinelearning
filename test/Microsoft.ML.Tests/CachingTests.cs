@@ -2,11 +2,11 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using System;
 using System.Linq;
 using System.Threading;
 using Microsoft.ML.Data;
 using Microsoft.ML.RunTests;
-using Microsoft.ML.StaticPipe;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -43,8 +43,8 @@ namespace Microsoft.ML.Tests
             var trainData = Enumerable.Range(0, 100).Select(c => new MyData()).ToArray();
 
             var pipe = ML.Transforms.CopyColumns("F1", "Features")
-                .Append(ML.Transforms.Normalize("Norm1", "F1"))
-                .Append(ML.Transforms.Normalize("Norm2", "F1", Transforms.NormalizingEstimator.NormalizationMode.MeanVariance));
+                .Append(ML.Transforms.NormalizeMinMax("Norm1", "F1"))
+                .Append(ML.Transforms.NormalizeMeanVariance("Norm2", "F1"));
 
             pipe.Fit(ML.Data.LoadFromEnumerable(trainData));
 
@@ -53,12 +53,28 @@ namespace Microsoft.ML.Tests
             trainData = Enumerable.Range(0, 100).Select(c => new MyData()).ToArray();
             pipe = ML.Transforms.CopyColumns("F1", "Features")
                 .AppendCacheCheckpoint(ML)
-                .Append(ML.Transforms.Normalize("Norm1", "F1"))
-                .Append(ML.Transforms.Normalize("Norm2", "F1", Transforms.NormalizingEstimator.NormalizationMode.MeanVariance));
+                .Append(ML.Transforms.NormalizeMinMax("Norm1", "F1"))
+                .Append(ML.Transforms.NormalizeMeanVariance("Norm2", "F1"));
 
             pipe.Fit(ML.Data.LoadFromEnumerable(trainData));
 
             Assert.True(trainData.All(x => x.AccessCount == 1));
+        }
+
+        [Fact]
+        public void CacheOnEmptyEstimatorChainTest()
+        {
+            var ex = Assert.Throws<InvalidOperationException>(() => CacheOnEmptyEstimatorChain());
+            Assert.Contains("Current estimator chain has no estimator, can't append cache checkpoint.", ex.Message, 
+                StringComparison.InvariantCultureIgnoreCase);
+        }
+
+        private void CacheOnEmptyEstimatorChain()
+        {
+            new EstimatorChain<ITransformer>().AppendCacheCheckpoint(ML)
+                .Append(ML.Transforms.CopyColumns("F1", "Features"))
+                .Append(ML.Transforms.NormalizeMinMax("Norm1", "F1"))
+                .Append(ML.Transforms.NormalizeMeanVariance("Norm2", "F1"));
         }
 
         [Fact]
@@ -76,26 +92,6 @@ namespace Microsoft.ML.Tests
             data.GetColumn<float[]>(data.Schema["Features"]).ToArray();
             data.GetColumn<float[]>(data.Schema["Features"]).ToArray();
             Assert.True(src.All(x => x.AccessCount == 1));
-        }
-
-        [Fact]
-        public void StaticDataCacheTest()
-        {
-            var env = new MLContext(seed: 0);
-            var dataPath = GetDataPath(TestDatasets.breastCancer.trainFilename);
-            var dataSource = new MultiFileSource(dataPath);
-
-            var reader = TextLoaderStatic.CreateLoader(env,
-                c => (label: c.LoadBool(0), features: c.LoadFloat(1, 9)));
-
-            var data = reader.Load(dataSource);
-
-            var cachedData = data.Cache();
-
-            // Before caching, we are not able to shuffle the data.
-            Assert.True(data.AsDynamic.CanShuffle == false);
-            // After caching, we are able to shuffle the data!
-            Assert.True(cachedData.AsDynamic.CanShuffle == true);
         }
     }
 }

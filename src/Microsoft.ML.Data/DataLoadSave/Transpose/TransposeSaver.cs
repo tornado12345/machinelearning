@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -33,10 +32,10 @@ namespace Microsoft.ML.Data.IO
             // REVIEW: Some use cases made clear to me that successfully using this with it *off* was actually
             // incredibly difficult (requiring deep knowledge of why, for instance, scoring cannot be done on slot-wise
             // data), so we will leave turning this off as an "advanced" option.
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Write a copy of the data in row-wise format, in addition to the transposed data. This will increase performance for mixed applications while taking significantly more space.", ShortName = "row")]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Write a copy of the data in row-wise format, in addition to the transposed data. This will increase performance for mixed applications while taking significantly more space.", ShortName = "row")]
             public bool WriteRowData = true;
 
-            [Argument(ArgumentType.LastOccurenceWins, HelpText = "Suppress any info output (not warnings or errors)", Hide = true)]
+            [Argument(ArgumentType.LastOccurrenceWins, HelpText = "Suppress any info output (not warnings or errors)", Hide = true)]
             public bool Silent;
         }
 
@@ -67,7 +66,7 @@ namespace Microsoft.ML.Data.IO
         {
             _host.CheckValue(type, nameof(type));
             // We can't transpose variable length columns at all, so nor can we save them.
-            if (type is VectorType vectorType && !vectorType.IsKnownSize)
+            if (type is VectorDataViewType vectorType && !vectorType.IsKnownSize)
                 return false;
             // Since we'll be presumably saving vectors of these, attempt to construct
             // an artificial vector type out of this. Obviously if you can't make a vector
@@ -76,7 +75,7 @@ namespace Microsoft.ML.Data.IO
             var primitiveType = itemType as PrimitiveDataViewType;
             if (primitiveType == null)
                 return false;
-            var newVectorType = new VectorType(primitiveType, size: 2);
+            var newVectorType = new VectorDataViewType(primitiveType, size: 2);
             return _internalSaver.IsColumnSavable(newVectorType);
         }
 

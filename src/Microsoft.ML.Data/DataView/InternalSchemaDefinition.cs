@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Runtime;
 
 namespace Microsoft.ML.Data
@@ -28,8 +27,7 @@ namespace Microsoft.ML.Data
             public readonly DataViewType ColumnType;
             public readonly bool IsComputed;
             public readonly Delegate Generator;
-            private readonly Dictionary<string, AnnotationInfo> _annotations;
-            public Dictionary<string, AnnotationInfo> Annotations { get { return _annotations; } }
+            public Dictionary<string, AnnotationInfo> Annotations { get; }
             public Type ComputedReturnType { get { return ReturnParameterInfo.ParameterType.GetElementType(); } }
             public Type FieldOrPropertyType => (MemberInfo is FieldInfo) ? (MemberInfo as FieldInfo).FieldType : (MemberInfo as PropertyInfo).PropertyType;
             public Type OutputType => IsComputed ? ComputedReturnType : FieldOrPropertyType;
@@ -75,7 +73,7 @@ namespace Microsoft.ML.Data
                 ColumnType = columnType;
                 IsComputed = generator != null;
                 Generator = generator;
-                _annotations = metadataInfos == null ? new Dictionary<string, AnnotationInfo>()
+                Annotations = metadataInfos == null ? new Dictionary<string, AnnotationInfo>()
                     : metadataInfos.ToDictionary(entry => entry.Key, entry => entry.Value);
 
                 AssertRep();
@@ -121,8 +119,8 @@ namespace Microsoft.ML.Data
                 Contracts.Assert(Generator.GetMethodInfo().ReturnType == typeof(void));
 
                 // Checks that the return type of the generator is compatible with ColumnType.
-                GetVectorAndItemType(ComputedReturnType, "return type", out bool isVector, out Type itemType);
-                Contracts.Assert(isVector == ColumnType is VectorType);
+                GetVectorAndItemType("return type", ComputedReturnType, null, out bool isVector, out Type itemType);
+                Contracts.Assert(isVector == ColumnType is VectorDataViewType);
                 Contracts.Assert(itemType == ColumnType.GetItemType().RawType);
             }
         }
@@ -149,11 +147,11 @@ namespace Microsoft.ML.Data
             switch (memberInfo)
             {
                 case FieldInfo fieldInfo:
-                    GetVectorAndItemType(fieldInfo.FieldType, fieldInfo.Name, out isVector, out itemType);
+                    GetVectorAndItemType(fieldInfo.Name, fieldInfo.FieldType, fieldInfo.GetCustomAttributes(), out isVector, out itemType);
                     break;
 
                 case PropertyInfo propertyInfo:
-                    GetVectorAndItemType(propertyInfo.PropertyType, propertyInfo.Name, out isVector, out itemType);
+                    GetVectorAndItemType(propertyInfo.Name, propertyInfo.PropertyType, propertyInfo.GetCustomAttributes(), out isVector, out itemType);
                     break;
 
                 default:
@@ -162,18 +160,7 @@ namespace Microsoft.ML.Data
             }
         }
 
-        /// <summary>
-        /// Given a type and name for a variable, returns whether this appears to be a vector type,
-        /// and also the associated data type for this type. If a valid data type could not
-        /// be determined, this will throw.
-        /// </summary>
-        /// <param name="rawType">The type of the variable to inspect.</param>
-        /// <param name="name">The name of the variable to inspect.</param>
-        /// <param name="isVector">Whether this appears to be a vector type.</param>
-        /// <param name="itemType">
-        /// The corresponding <see cref="PrimitiveDataViewType"/> RawType of the type, or items of this type if vector.
-        /// </param>
-        public static void GetVectorAndItemType(Type rawType, string name, out bool isVector, out Type itemType)
+        public static void GetMappedType(Type rawType, out Type itemType, out bool isVector)
         {
             // Determine whether this is a vector, and also determine the raw item type.
             isVector = true;
@@ -187,10 +174,32 @@ namespace Microsoft.ML.Data
                 isVector = false;
             }
 
+            // The internal type of string is ReadOnlyMemory<char>. That is, string will be stored as ReadOnlyMemory<char> in IDataView.
             if (itemType == typeof(string))
                 itemType = typeof(ReadOnlyMemory<char>);
-            else if (!itemType.TryGetDataKind(out _))
-                throw Contracts.ExceptParam(nameof(rawType), "Could not determine an IDataView type for member {0}", name);
+        }
+
+        /// <summary>
+        /// Given a type and name for a variable, returns whether this appears to be a vector type,
+        /// and also the associated data type for this type. If a valid data type could not
+        /// be determined, this will throw.
+        /// </summary>
+        /// <param name="name">The name of the variable to inspect.</param>
+        /// <param name="rawType">The type of the variable to inspect.</param>
+        /// <param name="attributes">Attribute of <paramref name="rawType"/>. It can be <see langword="null"/> if attributes don't exist.</param>
+        /// <param name="isVector">Whether this appears to be a vector type.</param>
+        /// <param name="itemType">
+        /// The corresponding <see cref="PrimitiveDataViewType"/> RawType of the type, or items of this type if vector.
+        /// </param>
+        public static void GetVectorAndItemType(string name, Type rawType, IEnumerable<Attribute> attributes, out bool isVector, out Type itemType)
+        {
+            GetMappedType(rawType, out itemType, out isVector);
+            // Check if the itemType extracted from rawType is supported by ML.NET's type system.
+            // It must be one of either ML.NET's pre-defined types or custom types registered by the user.
+            if (!itemType.TryGetDataKind(out _) && !DataViewTypeManager.Knows(itemType, attributes))
+            {
+                throw Contracts.ExceptParam(nameof(rawType), "Could not determine an IDataView type and registered custom types for member {0}", name);
+            }
         }
 
         public static InternalSchemaDefinition Create(Type userType, SchemaDefinition.Direction direction)
@@ -219,7 +228,7 @@ namespace Microsoft.ML.Data
                 Type dataItemType;
                 MemberInfo memberInfo = null;
 
-                if (!col.IsComputed)
+                if (col.Generator == null)
                 {
                     memberInfo = userType.GetField(col.MemberName);
 
@@ -244,7 +253,7 @@ namespace Microsoft.ML.Data
                     var parameterType = col.ReturnType;
                     if (parameterType == null)
                         throw Contracts.ExceptParam(nameof(userSchemaDefinition), "No return parameter found in computed column.");
-                    GetVectorAndItemType(parameterType, "returnType", out isVector, out dataItemType);
+                    GetVectorAndItemType("returnType", parameterType, null, out isVector, out dataItemType);
                 }
                 // Infer the column name.
                 var colName = string.IsNullOrEmpty(col.ColumnName) ? col.MemberName : col.ColumnName;
@@ -257,13 +266,13 @@ namespace Microsoft.ML.Data
                 {
                     // Infer a type as best we can.
                     PrimitiveDataViewType itemType = ColumnTypeExtensions.PrimitiveTypeFromType(dataItemType);
-                    colType = isVector ? new VectorType(itemType) : (DataViewType)itemType;
+                    colType = isVector ? new VectorDataViewType(itemType) : (DataViewType)itemType;
                 }
                 else
                 {
                     // Make sure that the types are compatible with the declared type, including
                     // whether it is a vector type.
-                    VectorType columnVectorType = col.ColumnType as VectorType;
+                    VectorDataViewType columnVectorType = col.ColumnType as VectorDataViewType;
                     if (isVector != (columnVectorType != null))
                     {
                         throw Contracts.ExceptParam(nameof(userSchemaDefinition), "Column '{0}' is supposed to be {1}, but type of associated field '{2}' is {3}",
@@ -278,9 +287,9 @@ namespace Microsoft.ML.Data
                     colType = col.ColumnType;
                 }
 
-                dstCols[i] = col.IsComputed ?
-                    new Column(colName, colType, col.Generator, col.Annotations)
-                    : new Column(colName, colType, memberInfo, col.Annotations);
+                dstCols[i] = col.Generator != null ?
+                    new Column(colName, colType, col.Generator, col.AnnotationInfos)
+                    : new Column(colName, colType, memberInfo, col.AnnotationInfos);
 
             }
             return new InternalSchemaDefinition(dstCols);

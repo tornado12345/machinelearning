@@ -8,39 +8,53 @@ using Microsoft.ML.Transforms;
 namespace Microsoft.ML
 {
     /// <summary>
-    /// The catalog of numerical feature engineering using kernel methods.
+    /// Collection of extension methods for <see cref="TransformsCatalog"/> to create instances of kernel method
+    /// feature engineering transformer components.
     /// </summary>
     public static class KernelExpansionCatalog
     {
         /// <summary>
-        /// Takes column filled with a vector of floats and maps its to a random low-dimensional feature space.
+        /// Create an <see cref="ApproximatedKernelMappingEstimator"/> that maps input vectors to a low dimensional
+        /// feature space where inner products approximate a shift-invariant kernel function.
         /// </summary>
         /// <param name="catalog">The transform's catalog.</param>
-        /// <param name="outputColumnName">Name of the column resulting from the transformation of <paramref name="inputColumnName"/>.</param>
-        /// <param name="inputColumnName">Name of column to transform. If set to <see langword="null"/>, the value of the <paramref name="outputColumnName"/> will be used as source.</param>
-        /// <param name="rank">The number of random Fourier features to create.</param>
-        /// <param name="useCosAndSinBases">If <see langword="true"/>, use both of cos and sin basis functions to create two features for every random Fourier frequency.
-        /// Otherwise, only cos bases would be used.</param>
+        /// <param name="outputColumnName">Name of the column resulting from the transformation of <paramref name="inputColumnName"/>.
+        ///  The data type on this column will be a known-sized vector of <see cref="System.Single"/>.</param>
+        /// <param name="inputColumnName">Name of column to transform. If set to <see langword="null"/>,
+        /// the value of the <paramref name="outputColumnName"/> will be used as source.
+        /// This estimator operates on known-sized vector of <see cref="System.Single"/> data type.</param>
+        /// <param name="rank">The dimension of the feature space to map the input to.</param>
+        /// <param name="useCosAndSinBases">If <see langword="true"/>, use both of cos and sin basis functions to create
+        /// two features for every random Fourier frequency. Otherwise, only cos bases would be used. Note that if set
+        /// to <see langword="true"/>, the dimension of the output feature space will be 2*<paramref name="rank"/>.</param>
+        /// <param name="generator">The argument that indicates which kernel to use. The two available implementations
+        /// are <see cref="GaussianKernel"/> and <see cref="LaplacianKernel"/>.</param>
+        /// <param name="seed">The seed of the random number generator for generating the new features (if unspecified, the global random is used).</param>
         /// <example>
         /// <format type="text/markdown">
         /// <![CDATA[
-        /// [!code-csharp[CreateRandomFourierFeatures](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/ProjectionTransforms.cs?range=1-6,12-112)]
+        /// [!code-csharp[ApproximatedKernelMap](~/../docs/samples/docs/samples/Microsoft.ML.Samples/Dynamic/Transforms/ApproximatedKernelMap.cs)]
         /// ]]>
         /// </format>
         /// </example>
-        public static RandomFourierKernelMappingEstimator RandomFourierKernelMap(this TransformsCatalog catalog,
+        public static ApproximatedKernelMappingEstimator ApproximatedKernelMap(this TransformsCatalog catalog,
             string outputColumnName,
             string inputColumnName = null,
-            int rank = RandomFourierKernelMappingEstimator.Defaults.Rank,
-            bool useCosAndSinBases = RandomFourierKernelMappingEstimator.Defaults.UseCosAndSinBases)
-            => new RandomFourierKernelMappingEstimator(CatalogUtils.GetEnvironment(catalog), outputColumnName, inputColumnName, rank, useCosAndSinBases);
+            int rank = ApproximatedKernelMappingEstimator.Defaults.Rank,
+            bool useCosAndSinBases = ApproximatedKernelMappingEstimator.Defaults.UseCosAndSinBases,
+            KernelBase generator = null,
+            int? seed = null)
+            => new ApproximatedKernelMappingEstimator(CatalogUtils.GetEnvironment(catalog),
+                new[] { new ApproximatedKernelMappingEstimator.ColumnOptions(outputColumnName, rank, useCosAndSinBases, inputColumnName, generator, seed) });
 
         /// <summary>
-        /// Takes columns filled with a vector of floats and maps its to a random low-dimensional feature space.
+        /// Create an <see cref="ApproximatedKernelMappingEstimator"/> that maps input vectors to a low dimensional
+        /// feature space where inner products approximate a shift-invariant kernel function.
         /// </summary>
         /// <param name="catalog">The transform's catalog.</param>
         /// <param name="columns">The input columns to use for the transformation.</param>
-        public static RandomFourierKernelMappingEstimator RandomFourierKernelMap(this TransformsCatalog catalog, params RandomFourierKernelMappingEstimator.ColumnOptions[] columns)
-            => new RandomFourierKernelMappingEstimator(CatalogUtils.GetEnvironment(catalog), columns);
+        [BestFriend]
+        internal static ApproximatedKernelMappingEstimator ApproximatedKernelMap(this TransformsCatalog catalog, params ApproximatedKernelMappingEstimator.ColumnOptions[] columns)
+            => new ApproximatedKernelMappingEstimator(CatalogUtils.GetEnvironment(catalog), columns);
     }
 }

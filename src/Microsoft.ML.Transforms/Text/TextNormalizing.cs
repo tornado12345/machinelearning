@@ -7,11 +7,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Transforms.Text;
 
@@ -30,8 +30,7 @@ using Microsoft.ML.Transforms.Text;
 namespace Microsoft.ML.Transforms.Text
 {
     /// <summary>
-    /// A text normalization transform that allows normalizing text case, removing diacritical marks, punctuation marks and/or numbers.
-    /// The transform operates on text input as well as vector of tokens/text (vector of ReadOnlyMemory).
+    /// <see cref="ITransformer"/> resulting from fitting a <see cref="TextNormalizingEstimator"/>.
     /// </summary>
     public sealed class TextNormalizingTransformer : OneToOneTransformerBase
     {
@@ -58,7 +57,7 @@ namespace Microsoft.ML.Transforms.Text
             public Column[] Columns;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Casing text using the rules of the invariant culture.", ShortName = "case", SortOrder = 1)]
-            public TextNormalizingEstimator.CaseNormalizationMode TextCase = TextNormalizingEstimator.Defaults.TextCase;
+            public TextNormalizingEstimator.CaseMode TextCase = TextNormalizingEstimator.Defaults.Mode;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Whether to keep diacritical marks or remove them.",
                 ShortName = "diac", SortOrder = 1)]
@@ -92,22 +91,22 @@ namespace Microsoft.ML.Transforms.Text
         /// <summary>
         /// The names of the output and input column pairs on which the transformation is applied.
         /// </summary>
-        public IReadOnlyCollection<(string outputColumnName, string inputColumnName)> Columns => ColumnPairs.AsReadOnly();
+        internal IReadOnlyCollection<(string outputColumnName, string inputColumnName)> Columns => ColumnPairs.AsReadOnly();
 
-        private readonly TextNormalizingEstimator.CaseNormalizationMode _textCase;
+        private readonly TextNormalizingEstimator.CaseMode _caseMode;
         private readonly bool _keepDiacritics;
         private readonly bool _keepPunctuations;
         private readonly bool _keepNumbers;
 
         internal TextNormalizingTransformer(IHostEnvironment env,
-            TextNormalizingEstimator.CaseNormalizationMode textCase = TextNormalizingEstimator.Defaults.TextCase,
+            TextNormalizingEstimator.CaseMode caseMode = TextNormalizingEstimator.Defaults.Mode,
             bool keepDiacritics = TextNormalizingEstimator.Defaults.KeepDiacritics,
             bool keepPunctuations = TextNormalizingEstimator.Defaults.KeepPunctuations,
             bool keepNumbers = TextNormalizingEstimator.Defaults.KeepNumbers,
             params (string outputColumnName, string inputColumnName)[] columns) :
             base(Contracts.CheckRef(env, nameof(env)).Register(RegistrationName), columns)
         {
-            _textCase = textCase;
+            _caseMode = caseMode;
             _keepDiacritics = keepDiacritics;
             _keepPunctuations = keepPunctuations;
             _keepNumbers = keepNumbers;
@@ -135,7 +134,7 @@ namespace Microsoft.ML.Transforms.Text
             // bool: whether to keep numbers
             SaveColumns(ctx);
 
-            ctx.Writer.Write((byte)_textCase);
+            ctx.Writer.Write((byte)_caseMode);
             ctx.Writer.WriteBoolByte(_keepDiacritics);
             ctx.Writer.WriteBoolByte(_keepPunctuations);
             ctx.Writer.WriteBoolByte(_keepNumbers);
@@ -161,8 +160,8 @@ namespace Microsoft.ML.Transforms.Text
             // bool: whether to keep diacritics
             // bool: whether to keep punctuations
             // bool: whether to keep numbers
-            _textCase = (TextNormalizingEstimator.CaseNormalizationMode)ctx.Reader.ReadByte();
-            host.CheckDecode(Enum.IsDefined(typeof(TextNormalizingEstimator.CaseNormalizationMode), _textCase));
+            _caseMode = (TextNormalizingEstimator.CaseMode)ctx.Reader.ReadByte();
+            host.CheckDecode(Enum.IsDefined(typeof(TextNormalizingEstimator.CaseMode), _caseMode));
 
             _keepDiacritics = ctx.Reader.ReadBoolByte();
             _keepPunctuations = ctx.Reader.ReadBoolByte();
@@ -196,7 +195,7 @@ namespace Microsoft.ML.Transforms.Text
 
         private protected override IRowMapper MakeRowMapper(DataViewSchema schema) => new Mapper(this, schema);
 
-        private sealed class Mapper : OneToOneMapperBase
+        private sealed class Mapper : OneToOneMapperBase, ISaveAsOnnx
         {
             private readonly DataViewType[] _types;
             private readonly TextNormalizingTransformer _parent;
@@ -210,10 +209,51 @@ namespace Microsoft.ML.Transforms.Text
                 {
                     inputSchema.TryGetColumnIndex(_parent.ColumnPairs[i].inputColumnName, out int srcCol);
                     var srcType = inputSchema[srcCol].Type;
-                    _types[i] = srcType is VectorType ? new VectorType(TextDataViewType.Instance) : srcType;
+                    _types[i] = srcType is VectorDataViewType ? new VectorDataViewType(TextDataViewType.Instance) : srcType;
                 }
             }
 
+            public bool CanSaveOnnx(OnnxContext ctx) => (_parent._keepDiacritics && _parent._keepNumbers && _parent._keepPunctuations);
+
+            public void SaveAsOnnx(OnnxContext ctx)
+            {
+                Host.CheckValue(ctx, nameof(ctx));
+                for (int iinfo = 0; iinfo < _types.Length; ++iinfo)
+                {
+                    string inputColumnName = _parent.ColumnPairs[iinfo].inputColumnName;
+                    if (!ctx.ContainsColumn(inputColumnName))
+                        continue;
+
+                    string outputColumnName = _parent.ColumnPairs[iinfo].outputColumnName;
+                    string srcVariableName = ctx.GetVariableName(inputColumnName);
+                    string dstVariableName = ctx.AddIntermediateVariable(_types[iinfo], outputColumnName, true);
+                    SaveAsOnnxCore(ctx, srcVariableName, dstVariableName);
+                }
+            }
+
+            private void SaveAsOnnxCore(OnnxContext ctx, string srcVariableName, string dstVariableName)
+            {
+                const int minimumOpSetVersion = 10;
+                ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
+
+                // StringNormalizer only takes input of shapes [C] or [1,C],
+                // so the input is squeezed to support inferred shapes ( e.g. [-1,C] ).
+                var opType = "Squeeze";
+                var squeezeOutput = ctx.AddIntermediateVariable(null, "SqueezeOutput", true);
+                var node = ctx.CreateNode(opType, srcVariableName, squeezeOutput, ctx.GetNodeName(opType), "");
+                node.AddAttribute("axes", new long[] { 1 });
+
+                opType = "StringNormalizer";
+                var normalizerOutput = ctx.AddIntermediateVariable(null, "NormalizerOutput", true);
+                node = ctx.CreateNode(opType, squeezeOutput, normalizerOutput, ctx.GetNodeName(opType), "");
+                var isCaseChange = (_parent._caseMode == TextNormalizingEstimator.CaseMode.Lower) ? "LOWER" :
+                    (_parent._caseMode == TextNormalizingEstimator.CaseMode.Upper) ? "UPPER" : "NONE";
+                node.AddAttribute("case_change_action", isCaseChange);
+
+                opType = "Unsqueeze";
+                node = ctx.CreateNode(opType, normalizerOutput, dstVariableName, ctx.GetNodeName(opType), "");
+                node.AddAttribute("axes", new long[] { 1 });
+            }
             protected override DataViewSchema.DetachedColumn[] GetOutputColumnsCore()
             {
                 var result = new DataViewSchema.DetachedColumn[_parent.ColumnPairs.Length];
@@ -232,34 +272,34 @@ namespace Microsoft.ML.Transforms.Text
             // List of pairs of (letters combined with diacritics, the letters without diacritics) from Office NL team.
             private static readonly string[] _combinedDiacriticsPairs =
             {
-            // Latin letters combined with diacritics:
-            "ÀA", "ÁA", "ÂA", "ÃA", "ÄA", "ÅA", "ÇC", "ÈE", "ÉE", "ÊE", "ËE", "ÌI", "ÍI", "ÎI", "ÏI", "ÑN",
-            "ÒO", "ÓO", "ÔO", "ÕO", "ÖO", "ÙU", "ÚU", "ÛU", "ÜU", "ÝY", "àa", "áa", "âa", "ãa", "äa", "åa",
-            "çc", "èe", "ée", "êe", "ëe", "ìi", "íi", "îi", "ïi", "ñn", "òo", "óo", "ôo", "õo", "öo", "ùu",
-            "úu", "ûu", "üu", "ýy", "ÿy", "ĀA", "āa", "ĂA", "ăa", "ĄA", "ąa", "ĆC", "ćc", "ĈC", "ĉc", "ĊC",
-            "ċc", "ČC", "čc", "ĎD", "ďd", "ĒE", "ēe", "ĔE", "ĕe", "ĖE", "ėe", "ĘE", "ęe", "ĚE", "ěe", "ĜG",
-            "ĝg", "ĞG", "ğg", "ĠG", "ġg", "ĢG", "ģg", "ĤH", "ĥh", "ĨI", "ĩi", "ĪI", "īi", "ĬI", "ĭi", "ĮI",
-            "įi", "İI", "ĴJ", "ĵj", "ĶK", "ķk", "ĹL", "ĺl", "ĻL", "ļl", "ĽL", "ľl", "ŃN", "ńn", "ŅN", "ņn",
-            "ŇN", "ňn", "ŌO", "ōo", "ŎO", "ŏo", "ŐO", "őo", "ŔR", "ŕr", "ŖR", "ŗr", "ŘR", "řr", "ŚS", "śs",
-            "ŜS", "ŝs", "ŞS", "şs", "ŠS", "šs", "ŢT", "ţt", "ŤT", "ťt", "ŨU", "ũu", "ŪU", "ūu", "ŬU", "ŭu",
-            "ŮU", "ůu", "ŰU", "űu", "ŲU", "ųu", "ŴW", "ŵw", "ŶY", "ŷy", "ŸY", "ŹZ", "źz", "ŻZ", "żz", "ŽZ",
-            "žz", "ƠO", "ơo", "ƯU", "ưu", "ǍA", "ǎa", "ǏI", "ǐi", "ǑO", "ǒo", "ǓU", "ǔu", "ǕU", "ǖu", "ǗU",
-            "ǘu", "ǙU", "ǚu", "ǛU", "ǜu", "ǞA", "ǟa", "ǠA", "ǡa", "ǢÆ", "ǣæ", "ǦG", "ǧg", "ǨK", "ǩk", "ǪO",
-            "ǫo", "ǬO", "ǭo", "ǮƷ", "ǯʒ", "ǰj", "ǴG", "ǵg", "ǸN", "ǹn", "ǺA", "ǻa", "ǼÆ", "ǽæ", "ǾØ", "ǿø",
-            "ȀA", "ȁa", "ȂA", "ȃa", "ȄE", "ȅe", "ȆE", "ȇe", "ȈI", "ȉi", "ȊI", "ȋi", "ȌO", "ȍo", "ȎO", "ȏo",
-            "ȐR", "ȑr", "ȒR", "ȓr", "ȔU", "ȕu", "ȖU", "ȗu", "ȘS", "șs", "ȚT", "țt", "ȞH", "ȟh", "ȦA", "ȧa",
-            "ȨE", "ȩe", "ȪO", "ȫo", "ȬO", "ȭo", "ȮO", "ȯo", "ȰO", "ȱo", "ȲY", "ȳy",
+                // Latin letters combined with diacritics:
+                "ÀA", "ÁA", "ÂA", "ÃA", "ÄA", "ÅA", "ÇC", "ÈE", "ÉE", "ÊE", "ËE", "ÌI", "ÍI", "ÎI", "ÏI", "ÑN",
+                "ÒO", "ÓO", "ÔO", "ÕO", "ÖO", "ÙU", "ÚU", "ÛU", "ÜU", "ÝY", "àa", "áa", "âa", "ãa", "äa", "åa",
+                "çc", "èe", "ée", "êe", "ëe", "ìi", "íi", "îi", "ïi", "ñn", "òo", "óo", "ôo", "õo", "öo", "ùu",
+                "úu", "ûu", "üu", "ýy", "ÿy", "ĀA", "āa", "ĂA", "ăa", "ĄA", "ąa", "ĆC", "ćc", "ĈC", "ĉc", "ĊC",
+                "ċc", "ČC", "čc", "ĎD", "ďd", "ĒE", "ēe", "ĔE", "ĕe", "ĖE", "ėe", "ĘE", "ęe", "ĚE", "ěe", "ĜG",
+                "ĝg", "ĞG", "ğg", "ĠG", "ġg", "ĢG", "ģg", "ĤH", "ĥh", "ĨI", "ĩi", "ĪI", "īi", "ĬI", "ĭi", "ĮI",
+                "įi", "İI", "ĴJ", "ĵj", "ĶK", "ķk", "ĹL", "ĺl", "ĻL", "ļl", "ĽL", "ľl", "ŃN", "ńn", "ŅN", "ņn",
+                "ŇN", "ňn", "ŌO", "ōo", "ŎO", "ŏo", "ŐO", "őo", "ŔR", "ŕr", "ŖR", "ŗr", "ŘR", "řr", "ŚS", "śs",
+                "ŜS", "ŝs", "ŞS", "şs", "ŠS", "šs", "ŢT", "ţt", "ŤT", "ťt", "ŨU", "ũu", "ŪU", "ūu", "ŬU", "ŭu",
+                "ŮU", "ůu", "ŰU", "űu", "ŲU", "ųu", "ŴW", "ŵw", "ŶY", "ŷy", "ŸY", "ŹZ", "źz", "ŻZ", "żz", "ŽZ",
+                "žz", "ƠO", "ơo", "ƯU", "ưu", "ǍA", "ǎa", "ǏI", "ǐi", "ǑO", "ǒo", "ǓU", "ǔu", "ǕU", "ǖu", "ǗU",
+                "ǘu", "ǙU", "ǚu", "ǛU", "ǜu", "ǞA", "ǟa", "ǠA", "ǡa", "ǢÆ", "ǣæ", "ǦG", "ǧg", "ǨK", "ǩk", "ǪO",
+                "ǫo", "ǬO", "ǭo", "ǮƷ", "ǯʒ", "ǰj", "ǴG", "ǵg", "ǸN", "ǹn", "ǺA", "ǻa", "ǼÆ", "ǽæ", "ǾØ", "ǿø",
+                "ȀA", "ȁa", "ȂA", "ȃa", "ȄE", "ȅe", "ȆE", "ȇe", "ȈI", "ȉi", "ȊI", "ȋi", "ȌO", "ȍo", "ȎO", "ȏo",
+                "ȐR", "ȑr", "ȒR", "ȓr", "ȔU", "ȕu", "ȖU", "ȗu", "ȘS", "șs", "ȚT", "țt", "ȞH", "ȟh", "ȦA", "ȧa",
+                "ȨE", "ȩe", "ȪO", "ȫo", "ȬO", "ȭo", "ȮO", "ȯo", "ȰO", "ȱo", "ȲY", "ȳy",
 
-            // Greek letters combined with diacritics:
-            "ΆΑ", "ΈΕ", "ΉΗ", "ΊΙ", "ΌΟ", "ΎΥ", "ΏΩ", "ΐι", "ΪΙ", "ΫΥ", "άα", "έε", "ήη", "ίι", "ΰυ", "ϊι",
-            "ϋυ", "όο", "ύυ", "ώω", "ϓϒ", "ϔϒ",
+                // Greek letters combined with diacritics:
+                "ΆΑ", "ΈΕ", "ΉΗ", "ΊΙ", "ΌΟ", "ΎΥ", "ΏΩ", "ΐι", "ΪΙ", "ΫΥ", "άα", "έε", "ήη", "ίι", "ΰυ", "ϊι",
+                "ϋυ", "όο", "ύυ", "ώω", "ϓϒ", "ϔϒ",
 
-            // Cyrillic letters combined with diacritics:
-            "ЀЕ", "ЁЕ", "ЃГ", "ЇІ", "ЌК", "ЍИ", "ЎУ", "ЙИ", "йи", "ѐе", "ёе", "ѓг", "їі", "ќк", "ѝи", "ўу",
-            "ѶѴ", "ѷѵ", "ӁЖ", "ӂж", "ӐА", "ӑа", "ӒА", "ӓа", "ӖЕ", "ӗе", "ӚӘ", "ӛә", "ӜЖ", "ӝж", "ӞЗ", "ӟз",
-            "ӢИ", "ӣи", "ӤИ", "ӥи", "ӦО", "ӧо", "ӪӨ", "ӫө", "ӬЭ", "ӭэ", "ӮУ", "ӯу", "ӰУ", "ӱу", "ӲУ", "ӳу",
-            "ӴЧ", "ӵч", "ӸЫ", "ӹы"
-        };
+                // Cyrillic letters combined with diacritics:
+                "ЀЕ", "ЁЕ", "ЃГ", "ЇІ", "ЌК", "ЍИ", "ЎУ", "ЙИ", "йи", "ѐе", "ёе", "ѓг", "їі", "ќк", "ѝи", "ўу",
+                "ѶѴ", "ѷѵ", "ӁЖ", "ӂж", "ӐА", "ӑа", "ӒА", "ӓа", "ӖЕ", "ӗе", "ӚӘ", "ӛә", "ӜЖ", "ӝж", "ӞЗ", "ӟз",
+                "ӢИ", "ӣи", "ӤИ", "ӥи", "ӦО", "ӧо", "ӪӨ", "ӫө", "ӬЭ", "ӭэ", "ӮУ", "ӯу", "ӰУ", "ӱу", "ӲУ", "ӳу",
+                "ӴЧ", "ӵч", "ӸЫ", "ӹы"
+            };
 
             private static Dictionary<char, char> CombinedDiacriticsMap
             {
@@ -292,7 +332,7 @@ namespace Microsoft.ML.Transforms.Text
                 var srcType = input.Schema[_parent.ColumnPairs[iinfo].inputColumnName].Type;
                 Host.Assert(srcType.GetItemType() is TextDataViewType);
 
-                if (srcType is VectorType vectorType)
+                if (srcType is VectorDataViewType vectorType)
                 {
                     Host.Assert(vectorType.Size >= 0);
                     return MakeGetterVec(input, iinfo);
@@ -381,9 +421,9 @@ namespace Microsoft.ML.Transforms.Text
                             ch = CombinedDiacriticsMap[ch];
                     }
 
-                    if (_parent._textCase == TextNormalizingEstimator.CaseNormalizationMode.Lower)
+                    if (_parent._caseMode == TextNormalizingEstimator.CaseMode.Lower)
                         ch = CharUtils.ToLowerInvariant(ch);
-                    else if (_parent._textCase == TextNormalizingEstimator.CaseNormalizationMode.Upper)
+                    else if (_parent._caseMode == TextNormalizingEstimator.CaseMode.Upper)
                         ch = CharUtils.ToUpperInvariant(ch);
 
                     if (ch != src.Span[i])
@@ -432,30 +472,61 @@ namespace Microsoft.ML.Transforms.Text
         }
     }
 
+    /// <summary>
+    /// <see cref="IEstimator{TTransformer}"/> for the <see cref="TextNormalizingTransformer"/>.
+    /// </summary>
+    /// <remarks>
+    /// <format type="text/markdown"><![CDATA[
+    ///
+    /// ###  Estimator Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Does this estimator need to look at the data to train its parameters? | No |
+    /// | Input column data type | Scalar or Vector of [Text](xref:Microsoft.ML.Data.TextDataViewType)|
+    /// | Output column data type | Scalar or variable-sized Vector of [Text](xref:Microsoft.ML.Data.TextDataViewType)|
+    /// | Exportable to ONNX | Yes |
+    ///
+    /// The resulting <xref:Microsoft.ML.Transforms.Text.TextNormalizingTransformer> creates a new column, named as specified
+    /// in the output column name parameters, and normalizes the textual input data by changing case, removing diacritical marks,
+    /// punctuation marks and/or numbers.
+    ///
+    /// Check the See Also section for links to usage examples.
+    /// ]]>
+    /// </format>
+    /// </remarks>
+    /// <seealso cref="TextCatalog.NormalizeText" />
     public sealed class TextNormalizingEstimator : TrivialEstimator<TextNormalizingTransformer>
     {
         /// <summary>
         /// Case normalization mode of text. This enumeration is serialized.
         /// </summary>
-        public enum CaseNormalizationMode
+        public enum CaseMode
         {
+            /// <summary>
+            /// Make the output characters lowercased.
+            /// </summary>
             Lower = 0,
+            /// <summary>
+            /// Make the output characters uppercased.
+            /// </summary>
             Upper = 1,
+            /// <summary>
+            /// Do not change the case of output characters.
+            /// </summary>
             None = 2
         }
 
         internal static class Defaults
         {
-            public const CaseNormalizationMode TextCase = CaseNormalizationMode.Lower;
+            public const CaseMode Mode = CaseMode.Lower;
             public const bool KeepDiacritics = false;
             public const bool KeepPunctuations = true;
             public const bool KeepNumbers = true;
-
         }
 
         internal static bool IsColumnTypeValid(DataViewType type) => (type.GetItemType() is TextDataViewType);
 
-        internal const string ExpectedColumnType = "Text or vector of text.";
+        internal const string ExpectedColumnType = "String or vector of String";
 
         /// <summary>
         /// Normalizes incoming text in <paramref name="inputColumnName"/> by changing case, removing diacritical marks, punctuation marks and/or numbers
@@ -464,18 +535,18 @@ namespace Microsoft.ML.Transforms.Text
         /// <param name="env">The environment.</param>
         /// <param name="outputColumnName">Name of the column resulting from the transformation of <paramref name="inputColumnName"/>.</param>
         /// <param name="inputColumnName">Name of the column to transform. If set to <see langword="null"/>, the value of the <paramref name="outputColumnName"/> will be used as source.</param>
-        /// <param name="textCase">Casing text using the rules of the invariant culture.</param>
+        /// <param name="caseMode">Casing text using the rules of the invariant culture.</param>
         /// <param name="keepDiacritics">Whether to keep diacritical marks or remove them.</param>
         /// <param name="keepPunctuations">Whether to keep punctuation marks or remove them.</param>
         /// <param name="keepNumbers">Whether to keep numbers or remove them.</param>
         internal TextNormalizingEstimator(IHostEnvironment env,
             string outputColumnName,
             string inputColumnName = null,
-            CaseNormalizationMode textCase = Defaults.TextCase,
+            CaseMode caseMode = Defaults.Mode,
             bool keepDiacritics = Defaults.KeepDiacritics,
             bool keepPunctuations = Defaults.KeepPunctuations,
             bool keepNumbers = Defaults.KeepNumbers)
-            : this(env, textCase, keepDiacritics, keepPunctuations, keepNumbers, (outputColumnName, inputColumnName ?? outputColumnName))
+            : this(env, caseMode, keepDiacritics, keepPunctuations, keepNumbers, (outputColumnName, inputColumnName ?? outputColumnName))
         {
         }
 
@@ -484,19 +555,19 @@ namespace Microsoft.ML.Transforms.Text
         /// and outputs new text as output columns.
         /// </summary>
         /// <param name="env">The environment.</param>
-        /// <param name="textCase">Casing text using the rules of the invariant culture.</param>
+        /// <param name="caseMode">Casing text using the rules of the invariant culture.</param>
         /// <param name="keepDiacritics">Whether to keep diacritical marks or remove them.</param>
         /// <param name="keepPunctuations">Whether to keep punctuation marks or remove them.</param>
         /// <param name="keepNumbers">Whether to keep numbers or remove them.</param>
         /// <param name="columns">Pairs of columns to run the text normalization on.</param>
         internal TextNormalizingEstimator(IHostEnvironment env,
-            CaseNormalizationMode textCase = Defaults.TextCase,
+            CaseMode caseMode = Defaults.Mode,
             bool keepDiacritics = Defaults.KeepDiacritics,
             bool keepPunctuations = Defaults.KeepPunctuations,
             bool keepNumbers = Defaults.KeepNumbers,
             params (string outputColumnName, string inputColumnName)[] columns)
             : base(Contracts.CheckRef(env, nameof(env)).Register(nameof(TextNormalizingEstimator)),
-                  new TextNormalizingTransformer(env, textCase, keepDiacritics, keepPunctuations, keepNumbers, columns))
+                  new TextNormalizingTransformer(env, caseMode, keepDiacritics, keepPunctuations, keepNumbers, columns))
         {
         }
 
@@ -514,7 +585,7 @@ namespace Microsoft.ML.Transforms.Text
                     throw Host.ExceptSchemaMismatch(nameof(inputSchema), "input", colInfo.inputColumnName);
                 if (!IsColumnTypeValid(col.ItemType))
                     throw Host.ExceptSchemaMismatch(nameof(inputSchema), "input", colInfo.inputColumnName, TextNormalizingEstimator.ExpectedColumnType, col.ItemType.ToString());
-                result[colInfo.outputColumnName] = new SchemaShape.Column(colInfo.outputColumnName, col.Kind == SchemaShape.Column.VectorKind.Vector ? SchemaShape.Column.VectorKind.VariableVector : SchemaShape.Column.VectorKind.Scalar, col.ItemType, false);
+                result[colInfo.outputColumnName] = new SchemaShape.Column(colInfo.outputColumnName, col.Kind == SchemaShape.Column.VectorKind.Scalar ? SchemaShape.Column.VectorKind.Scalar : SchemaShape.Column.VectorKind.VariableVector, col.ItemType, false);
             }
             return new SchemaShape(result.Values);
         }

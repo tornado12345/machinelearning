@@ -8,8 +8,7 @@ using System.Collections.Immutable;
 using System.Linq;
 using Microsoft.ML.Data;
 using Microsoft.ML.Functional.Tests.Datasets;
-using Microsoft.ML.RunTests;
-using Microsoft.ML.TestFramework;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Trainers;
 using Microsoft.ML.Trainers.FastTree;
 using Microsoft.ML.Transforms;
@@ -18,7 +17,7 @@ using Xunit.Abstractions;
 
 namespace Microsoft.ML.Functional.Tests
 {
-    public class IntrospectiveTraining : BaseTestClass
+    public class IntrospectiveTraining : FunctionalTestBaseClass
     {
         public IntrospectiveTraining(ITestOutputHelper output) : base(output)
         {
@@ -33,12 +32,12 @@ namespace Microsoft.ML.Functional.Tests
             var mlContext = new MLContext(seed: 1);
 
             // Get the dataset.
-            var data = mlContext.Data.LoadFromTextFile<HousingRegression>(GetDataPath(TestDatasets.housing.trainFilename), hasHeader: true);
+            var data = mlContext.Data.LoadFromTextFile<HousingRegression>(TestCommon.GetDataPath(DataDir, TestDatasets.housing.trainFilename), hasHeader: true);
 
             // Create a pipeline to train on the housing data.
             var pipeline = mlContext.Transforms.Concatenate("Features", HousingRegression.Features)
                 .Append(mlContext.Regression.Trainers.FastForest(
-                    new FastForestRegression.Options { NumberOfLeaves = 5, NumberOfTrees = 3, NumberOfThreads = 1 }));
+                    new FastForestRegressionTrainer.Options { NumberOfLeaves = 5, NumberOfTrees = 3, NumberOfThreads = 1 }));
 
             // Fit the pipeline.
             var model = pipeline.Fit(data);
@@ -73,7 +72,7 @@ namespace Microsoft.ML.Functional.Tests
         {
             var mlContext = new MLContext(seed: 1);
 
-            var data = mlContext.Data.LoadFromTextFile<TweetSentiment>(GetDataPath(TestDatasets.Sentiment.trainFilename),
+            var data = mlContext.Data.LoadFromTextFile<TweetSentiment>(TestCommon.GetDataPath(DataDir, TestDatasets.Sentiment.trainFilename),
                 hasHeader: TestDatasets.Sentiment.fileHasHeader,
                 separatorChar: TestDatasets.Sentiment.fileSeparator,
                 allowQuoting: TestDatasets.Sentiment.allowQuoting);
@@ -82,7 +81,7 @@ namespace Microsoft.ML.Functional.Tests
             var pipeline = mlContext.Transforms.Text.FeaturizeText("Features", "SentimentText")
                 .AppendCacheCheckpoint(mlContext)
                 .Append(mlContext.BinaryClassification.Trainers.FastTree(
-                    new FastTreeBinaryClassificationTrainer.Options{ NumberOfLeaves = 5, NumberOfTrees= 3, NumberOfThreads = 1 }));
+                    new FastTreeBinaryTrainer.Options{ NumberOfLeaves = 5, NumberOfTrees= 3, NumberOfThreads = 1 }));
 
             // Fit the pipeline.
             var model = pipeline.Fit(data);
@@ -129,21 +128,21 @@ namespace Microsoft.ML.Functional.Tests
         /// Introspective Training: GAM Shape Functions are easily accessed.
         /// </summary>
         [Fact]
-        void IntrospectGamShapeFunctions()
+        public void IntrospectGamShapeFunctions()
         {
             // Concurrency must be 1 to assure that the mapping is done sequentially.
             var mlContext = new MLContext(seed: 1);
 
             // Load the Iris dataset.
             var data = mlContext.Data.LoadFromTextFile<Iris>(
-                GetDataPath(TestDatasets.iris.trainFilename),
+                TestCommon.GetDataPath(DataDir, TestDatasets.iris.trainFilename),
                 hasHeader: TestDatasets.iris.fileHasHeader,
                 separatorChar: TestDatasets.iris.fileSeparator);
 
             // Compose the transformation.
             var pipeline = mlContext.Transforms.Concatenate("Features", Iris.Features)
-                .Append(mlContext.Regression.Trainers.GeneralizedAdditiveModels(
-                    new RegressionGamTrainer.Options { NumberOfIterations = 100, NumberOfThreads = 1 }));
+                .Append(mlContext.Regression.Trainers.Gam(
+                    new GamRegressionTrainer.Options { NumberOfIterations = 100, NumberOfThreads = 1 }));
 
             // Fit the pipeline.
             var model = pipeline.Fit(data);
@@ -176,27 +175,36 @@ namespace Microsoft.ML.Functional.Tests
             var mlContext = new MLContext(seed: 1);
 
             // Load the dataset.
-            var data = mlContext.Data.LoadFromTextFile<TweetSentiment>(GetDataPath(TestDatasets.Sentiment.trainFilename),
+            var data = mlContext.Data.LoadFromTextFile<TweetSentiment>(TestCommon.GetDataPath(DataDir, TestDatasets.Sentiment.trainFilename),
                 hasHeader: TestDatasets.Sentiment.fileHasHeader,
                 separatorChar: TestDatasets.Sentiment.fileSeparator,
                 allowQuoting: TestDatasets.Sentiment.allowQuoting);
 
             // Define the pipeline.
             var pipeline = mlContext.Transforms.Text.ProduceWordBags("SentimentBag", "SentimentText")
-                .Append(mlContext.Transforms.Text.LatentDirichletAllocation("Features", "SentimentBag", numTopic: numTopics, numIterations: 10));
+                .Append(mlContext.Transforms.Text.LatentDirichletAllocation("Features", "SentimentBag", 
+                numberOfTopics: numTopics, maximumNumberOfIterations: 10));
 
             // Fit the pipeline.
             var model = pipeline.Fit(data);
 
             // Get the trained LDA model.
-            // TODO #2197: Get the topics and summaries from the model.
             var ldaTransform = model.LastTransformer;
+
+            // Get the topics and summaries from the model.
+            var ldaDetails = ldaTransform.GetLdaDetails(0);
+            Assert.False(ldaDetails.ItemScoresPerTopic == null && ldaDetails.WordScoresPerTopic == null);
+            if(ldaDetails.ItemScoresPerTopic != null)
+                Assert.Equal(numTopics, ldaDetails.ItemScoresPerTopic.Count);
+            if (ldaDetails.WordScoresPerTopic != null)
+                Assert.Equal(numTopics, ldaDetails.WordScoresPerTopic.Count);
+
 
             // Transform the data.
             var transformedData = model.Transform(data);
 
             // Make sure the model weights array is the same length as the features array.
-            var numFeatures = (transformedData.Schema["Features"].Type as VectorType).Size;
+            var numFeatures = (transformedData.Schema["Features"].Type as VectorDataViewType).Size;
             Assert.Equal(numFeatures, numTopics);
         }
 
@@ -208,7 +216,7 @@ namespace Microsoft.ML.Functional.Tests
         {
             var mlContext = new MLContext(seed: 1);
 
-            var data = mlContext.Data.LoadFromTextFile<TweetSentiment>(GetDataPath(TestDatasets.Sentiment.trainFilename),
+            var data = mlContext.Data.LoadFromTextFile<TweetSentiment>(TestCommon.GetDataPath(DataDir, TestDatasets.Sentiment.trainFilename),
                 hasHeader: TestDatasets.Sentiment.fileHasHeader,
                 separatorChar: TestDatasets.Sentiment.fileSeparator,
                 allowQuoting: TestDatasets.Sentiment.allowQuoting);
@@ -216,7 +224,7 @@ namespace Microsoft.ML.Functional.Tests
             // Create a training pipeline.
             var pipeline = mlContext.Transforms.Text.FeaturizeText("Features", "SentimentText")
                 .AppendCacheCheckpoint(mlContext)
-                .Append(mlContext.BinaryClassification.Trainers.StochasticDualCoordinateAscentNonCalibrated(
+                .Append(mlContext.BinaryClassification.Trainers.SdcaNonCalibrated(
                     new SdcaNonCalibratedBinaryTrainer.Options { NumberOfThreads = 1 }));
 
             // Fit the pipeline.
@@ -233,7 +241,7 @@ namespace Microsoft.ML.Functional.Tests
             var weights = linearModel.Weights;
 
             // Make sure the model weights array is the same length as the features array.
-            var numFeatures = (transformedData.Schema["Features"].Type as VectorType).Size;
+            var numFeatures = (transformedData.Schema["Features"].Type as VectorDataViewType).Size;
             Assert.Equal(numFeatures, weights.Count);
         }
 
@@ -241,20 +249,20 @@ namespace Microsoft.ML.Functional.Tests
         /// Introspectable Training: Parameters of a trained Normalizer are easily accessed.
         /// </summary>
         [Fact]
-        void IntrospectNormalization()
+        public void IntrospectNormalization()
         {
             // Concurrency must be 1 to assure that the mapping is done sequentially.
             var mlContext = new MLContext(seed: 1);
 
             // Load the Iris dataset.
             var data = mlContext.Data.LoadFromTextFile<Iris>(
-                GetDataPath(TestDatasets.iris.trainFilename),
+                TestCommon.GetDataPath(DataDir, TestDatasets.iris.trainFilename),
                 hasHeader: TestDatasets.iris.fileHasHeader,
                 separatorChar: TestDatasets.iris.fileSeparator);
 
             // Compose the transformation.
             var pipeline = mlContext.Transforms.Concatenate("Features", Iris.Features)
-                .Append(mlContext.Transforms.Normalize("Features", mode: NormalizingEstimator.NormalizationMode.MinMax));
+                .Append(mlContext.Transforms.NormalizeMinMax("Features"));
 
             // Fit the pipeline.
             var model = pipeline.Fit(data);
@@ -264,21 +272,10 @@ namespace Microsoft.ML.Functional.Tests
 
             // Extract the normalizer parameters.
             // TODO #2854: Normalizer parameters are easy to find via intellisense.
-            int i = 0;
-            bool found = false;
-            foreach (var column in normalizer.Columns)
-            {
-                if (column.Name == "Features")
-                {
-                    found = true;
-                    var featuresNormalizer = normalizer.Columns[i].ModelParameters as NormalizingTransformer.AffineNormalizerModelParameters<ImmutableArray<float>>;
-                    Assert.NotNull(featuresNormalizer);
-                    Common.AssertFiniteNumbers(featuresNormalizer.Offset);
-                    Common.AssertFiniteNumbers(featuresNormalizer.Scale);
-                }
-                i++;
-            }
-            Assert.True(found);
+            var config = normalizer.GetNormalizerModelParameters(0) as NormalizingTransformer.AffineNormalizerModelParameters<ImmutableArray<float>>;
+            Assert.NotNull(config);
+            Common.AssertFiniteNumbers(config.Offset);
+            Common.AssertFiniteNumbers(config.Scale);
         }
         /// <summary>
         /// Introspective Training: I can inspect a pipeline to determine which transformers were included. 	 
@@ -289,7 +286,7 @@ namespace Microsoft.ML.Functional.Tests
             var mlContext = new MLContext(seed: 1);
 
             // Get the dataset.
-            var data = mlContext.Data.LoadFromTextFile<HousingRegression>(GetDataPath(TestDatasets.housing.trainFilename), hasHeader: true);
+            var data = mlContext.Data.LoadFromTextFile<HousingRegression>(TestCommon.GetDataPath(DataDir, TestDatasets.housing.trainFilename), hasHeader: true);
 
             // Create a pipeline to train on the housing data.
             var pipeline = mlContext.Transforms.Concatenate("Features", HousingRegression.Features)
@@ -332,15 +329,15 @@ namespace Microsoft.ML.Functional.Tests
             var mlContext = new MLContext(seed: 1);
 
             // Load the Adult dataset.
-            var data = mlContext.Data.LoadFromTextFile<Adult>(GetDataPath(TestDatasets.adult.trainFilename),
+            var data = mlContext.Data.LoadFromTextFile<Adult>(TestCommon.GetDataPath(DataDir, TestDatasets.adult.trainFilename),
                 hasHeader: TestDatasets.adult.fileHasHeader,
                 separatorChar: TestDatasets.adult.fileSeparator);
 
             // Create the learning pipeline.
             var pipeline = mlContext.Transforms.Concatenate("NumericalFeatures", Adult.NumericalFeatures)
                 .Append(mlContext.Transforms.Concatenate("CategoricalFeatures", Adult.CategoricalFeatures))
-                .Append(mlContext.Transforms.Categorical.OneHotHashEncoding("CategoricalFeatures", hashBits: 8, // get collisions!
-                    invertHash: -1, outputKind: OneHotEncodingTransformer.OutputKind.Bag));
+                .Append(mlContext.Transforms.Categorical.OneHotHashEncoding("CategoricalFeatures", numberOfBits: 8, // get collisions!
+                    maximumNumberOfInverts: -1, outputKind: OneHotEncodingEstimator.OutputKind.Bag));
 
             // Fit the pipeline.
             var model = pipeline.Fit(data);
@@ -389,7 +386,7 @@ namespace Microsoft.ML.Functional.Tests
         {
             var mlContext = new MLContext(seed: 1);
 
-            var data = mlContext.Data.LoadFromTextFile<Iris>(GetDataPath(TestDatasets.iris.trainFilename),
+            var data = mlContext.Data.LoadFromTextFile<Iris>(TestCommon.GetDataPath(DataDir, TestDatasets.iris.trainFilename),
                 hasHeader: TestDatasets.iris.fileHasHeader,
                 separatorChar: TestDatasets.iris.fileSeparator);
 
@@ -404,7 +401,7 @@ namespace Microsoft.ML.Functional.Tests
             // Extract the trained models.
             var modelComponents = model.ToList();
             var kMeansModel = (modelComponents[1] as TransformerChain<ClusteringPredictionTransformer<KMeansModelParameters>>).LastTransformer;
-            var mcLrModel = (modelComponents[2] as TransformerChain<MulticlassPredictionTransformer<MulticlassLogisticRegressionModelParameters>>).LastTransformer;
+            var mcLrModel = (modelComponents[2] as TransformerChain<MulticlassPredictionTransformer<MaximumEntropyModelParameters>>).LastTransformer;
 
             // Validate the k-means model.
             VBuffer<float>[] centroids = default;
@@ -421,20 +418,20 @@ namespace Microsoft.ML.Functional.Tests
         {
             return mlContext.Transforms.Concatenate("LabelAndFeatures", "Label", "Features")
                 .Append(mlContext.Clustering.Trainers.KMeans(
-                    new KMeansPlusPlusTrainer.Options
+                    new KMeansTrainer.Options
                     {
-                        InitializationAlgorithm = KMeansPlusPlusTrainer.InitializationAlgorithm.Random,
+                        InitializationAlgorithm = KMeansTrainer.InitializationAlgorithm.Random,
                         NumberOfClusters = 4,
                         MaximumNumberOfIterations = 10,
                         NumberOfThreads = 1
                     }));
         }
 
-        private IEstimator<TransformerChain<MulticlassPredictionTransformer<MulticlassLogisticRegressionModelParameters>>> StepTwo(MLContext mlContext)
+        private IEstimator<TransformerChain<MulticlassPredictionTransformer<MaximumEntropyModelParameters>>> StepTwo(MLContext mlContext)
         {
             return mlContext.Transforms.Conversion.MapValueToKey("Label")
-                .Append(mlContext.MulticlassClassification.Trainers.StochasticDualCoordinateAscent(
-                new SdcaMultiClassTrainer.Options {
+                .Append(mlContext.MulticlassClassification.Trainers.SdcaMaximumEntropy(
+                new SdcaMaximumEntropyMulticlassTrainer.Options {
                     MaximumNumberOfIterations = 10,
                     NumberOfThreads = 1 }));
         }

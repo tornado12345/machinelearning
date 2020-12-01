@@ -9,12 +9,18 @@ using System.Linq;
 using System.Threading;
 using Microsoft.ML.Data;
 using Microsoft.ML.Runtime;
+using Microsoft.ML.TestFramework;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Microsoft.ML.RunTests
 {
-    public class TestHosts
+    public class TestHosts : BaseTestClass
     {
+        public TestHosts(ITestOutputHelper output) : base(output)
+        {
+        }
+
         [Fact]
         public void TestCancellation()
         {
@@ -55,21 +61,59 @@ namespace Microsoft.ML.RunTests
                     do
                     {
                         index = rand.Next(hosts.Count);
-                    } while (hosts.ElementAt(index).Item1.IsCancelled || hosts.ElementAt(index).Item2 < 3);
-                    hosts.ElementAt(index).Item1.StopExecution();
+                    } while ((hosts.ElementAt(index).Item1 as ICancelable).IsCanceled ||
+                              // use 2 instead of 3 here as there is no guarantee there is always level 2 children
+                              hosts.ElementAt(index).Item2 < 2);
+                    (hosts.ElementAt(index).Item1 as ICancelable).CancelExecution();
                     rootHost = hosts.ElementAt(index).Item1;
                     queue.Enqueue(rootHost);
+
+                    // all children has been canceled, we should stop looking
+                    if (hosts.Count(q => (q.Item1 as ICancelable).IsCanceled) == hosts.Count - 5)
+                    {
+                        break;
+                    }
                 }
                 addThread.Join();
                 while (queue.Count > 0)
                 {
                     var currentHost = queue.Dequeue();
-                    Assert.True(currentHost.IsCancelled);
+                    Assert.True((currentHost as ICancelable).IsCanceled);
 
                     if (children.ContainsKey(currentHost))
                         children[currentHost].ForEach(x => queue.Enqueue(x));
                 }
             }
+        }
+
+        [Fact]
+        public void TestCancellationApi()
+        {
+            IHostEnvironment env = new MLContext(seed: 42);
+            var mainHost = env.Register("Main");
+            var children = new ConcurrentDictionary<IHost, List<IHost>>();
+            var hosts = new BlockingCollection<Tuple<IHost, int>>();
+            hosts.Add(new Tuple<IHost, int>(mainHost.Register("1"), 1));
+            hosts.Add(new Tuple<IHost, int>(mainHost.Register("2"), 1));
+            hosts.Add(new Tuple<IHost, int>(mainHost.Register("3"), 1));
+            hosts.Add(new Tuple<IHost, int>(mainHost.Register("4"), 1));
+            hosts.Add(new Tuple<IHost, int>(mainHost.Register("5"), 1));
+
+            for (int i = 0; i < 5; i++)
+            {
+                var tupple = hosts.ElementAt(i);
+                var newHost = tupple.Item1.Register((tupple.Item2 + 1).ToString());
+                hosts.Add(new Tuple<IHost, int>(newHost, tupple.Item2 + 1));
+            }
+
+            ((MLContext)env).CancelExecution();
+
+            //Ensure all created hosts are canceled.
+            //5 parent and one child for each.
+            Assert.Equal(10, hosts.Count);
+
+            foreach (var host in hosts)
+                Assert.True((host.Item1 as ICancelable).IsCanceled);
         }
 
         /// <summary>
@@ -80,7 +124,7 @@ namespace Microsoft.ML.RunTests
         {
             var messages = new List<string>();
 
-            var env = new MLContext();
+            var env = new MLContext(1);
             env.Log += (sender, e) => messages.Add(e.Message);
 
             // create a dummy text reader to trigger log messages

@@ -93,9 +93,23 @@ namespace Microsoft.ML.Runtime
     /// query progress.
     /// </summary>
     [BestFriend]
-    internal abstract class HostEnvironmentBase<TEnv> : ChannelProviderBase, IHostEnvironment, IChannelProvider
+    internal abstract class HostEnvironmentBase<TEnv> : ChannelProviderBase, ISeededEnvironment, IChannelProvider, ICancelable
         where TEnv : HostEnvironmentBase<TEnv>
     {
+        void ICancelable.CancelExecution()
+        {
+            lock (_cancelLock)
+            {
+                foreach (var child in _children)
+                    if (child.TryGetTarget(out IHost host))
+                        if (host is ICancelable cancelableHost)
+                            cancelableHost.CancelExecution();
+
+                _children.Clear();
+                IsCanceled = true;
+            }
+        }
+
         /// <summary>
         /// Base class for hosts. Classes derived from  <see cref="HostEnvironmentBase{THostEnvironmentBase}"/> may choose
         /// to provide their own host class that derives from this class.
@@ -107,39 +121,27 @@ namespace Microsoft.ML.Runtime
 
             public Random Rand => _rand;
 
-            // We don't have dispose mechanism for hosts, so to let GC collect children hosts we make them WeakReference.
-            private readonly List<WeakReference<IHost>> _children;
-
             public HostBase(HostEnvironmentBase<TEnv> source, string shortName, string parentFullName, Random rand, bool verbose)
                 : base(source, rand, verbose, shortName, parentFullName)
             {
                 Depth = source.Depth + 1;
-                _children = new List<WeakReference<IHost>>();
             }
 
-            public void StopExecution()
-            {
-                lock (_cancelLock)
-                {
-                    IsCancelled = true;
-                    foreach (var child in _children)
-                    {
-                        if (child.TryGetTarget(out IHost host))
-                            host.StopExecution();
-                    }
-                    _children.Clear();
-                }
-            }
-
+            /// <summary>
+            /// This method registers and returns the host for the calling component. The generated host is also
+            /// added to <see cref="_children"/> and encapsulated by <see cref="WeakReference"/>. It becomes
+            /// necessary to remove these hosts when they are reclaimed by the Garbage Collector.
+            /// </summary>
             public new IHost Register(string name, int? seed = null, bool? verbose = null)
             {
                 Contracts.CheckNonEmpty(name, nameof(name));
                 IHost host;
                 lock (_cancelLock)
                 {
+                    _children.RemoveAll(r => r.TryGetTarget(out IHost _) == false);
                     Random rand = (seed.HasValue) ? RandomUtils.Create(seed.Value) : RandomUtils.Create(_rand);
                     host = RegisterCore(this, name, Master?.FullName, rand, verbose ?? Verbose);
-                    if (!IsCancelled)
+                    if (!IsCanceled)
                         _children.Add(new WeakReference<IHost>(host));
                 }
                 return host;
@@ -175,7 +177,7 @@ namespace Microsoft.ML.Runtime
 
             public void Dispose()
             {
-                if(!_disposed)
+                if (!_disposed)
                 {
                     Dispose(true);
                     _disposed = true;
@@ -334,31 +336,38 @@ namespace Microsoft.ML.Runtime
 
         // The random number generator for this host.
         private readonly Random _rand;
+
+        public int? Seed { get; }
+
         // A dictionary mapping the type of message to the Dispatcher that gets the strongly typed dispatch delegate.
         protected readonly ConcurrentDictionary<Type, Dispatcher> ListenerDict;
 
         protected readonly ProgressReporting.ProgressTracker ProgressTracker;
 
-        public bool IsCancelled { get; protected set; }
-
         public ComponentCatalog ComponentCatalog { get; }
 
         public override int Depth => 0;
 
+        public bool IsCanceled { get; protected set; }
+
+        // We don't have dispose mechanism for hosts, so to let GC collect children hosts we make them WeakReference.
+        private readonly List<WeakReference<IHost>> _children;
+
         /// <summary>
-        ///  The main constructor.
+        /// The main constructor.
         /// </summary>
-        protected HostEnvironmentBase(Random rand, bool verbose,
+        protected HostEnvironmentBase(int? seed, bool verbose,
             string shortName = null, string parentFullName = null)
             : base(shortName, parentFullName, verbose)
         {
-            Contracts.CheckValueOrNull(rand);
-            _rand = rand ?? RandomUtils.Create();
+            Seed = seed;
+            _rand = RandomUtils.Create(Seed);
             ListenerDict = new ConcurrentDictionary<Type, Dispatcher>();
             ProgressTracker = new ProgressReporting.ProgressTracker(this);
             _cancelLock = new object();
             Root = this as TEnv;
             ComponentCatalog = new ComponentCatalog();
+            _children = new List<WeakReference<IHost>>();
         }
 
         /// <summary>
@@ -379,13 +388,26 @@ namespace Microsoft.ML.Runtime
             ListenerDict = source.ListenerDict;
             ProgressTracker = source.ProgressTracker;
             ComponentCatalog = source.ComponentCatalog;
+            _children = new List<WeakReference<IHost>>();
         }
 
+        /// <summary>
+        /// This method registers and returns the host for the calling component. The generated host is also
+        /// added to <see cref="_children"/> and encapsulated by <see cref="WeakReference"/>. It becomes
+        /// necessary to remove these hosts when they are reclaimed by the Garbage Collector.
+        /// </summary>
         public IHost Register(string name, int? seed = null, bool? verbose = null)
         {
             Contracts.CheckNonEmpty(name, nameof(name));
-            Random rand = (seed.HasValue) ? RandomUtils.Create(seed.Value) : RandomUtils.Create(_rand);
-            return RegisterCore(this, name, Master?.FullName, rand, verbose ?? Verbose);
+            IHost host;
+            lock (_cancelLock)
+            {
+                _children.RemoveAll(r => r.TryGetTarget(out IHost _) == false);
+                Random rand = (seed.HasValue) ? RandomUtils.Create(seed.Value) : RandomUtils.Create(_rand);
+                host = RegisterCore(this, name, Master?.FullName, rand, verbose ?? Verbose);
+                _children.Add(new WeakReference<IHost>(host));
+            }
+            return host;
         }
 
         protected abstract IHost RegisterCore(HostEnvironmentBase<TEnv> source, string shortName,

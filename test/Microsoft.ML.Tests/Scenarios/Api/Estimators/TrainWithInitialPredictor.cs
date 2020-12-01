@@ -4,6 +4,7 @@
 
 using Microsoft.ML.Data;
 using Microsoft.ML.RunTests;
+using Microsoft.ML.TestFrameworkCommon;
 using Microsoft.ML.Trainers;
 using Xunit;
 
@@ -31,7 +32,7 @@ namespace Microsoft.ML.Tests.Scenarios.Api
             var trainData = ml.Data.Cache(pipeline.Fit(data).Transform(data));
 
             // Train the first predictor.
-            var trainer = ml.BinaryClassification.Trainers.StochasticDualCoordinateAscentNonCalibrated(
+            var trainer = ml.BinaryClassification.Trainers.SdcaNonCalibrated(
                 new SdcaNonCalibratedBinaryTrainer.Options { NumberOfThreads = 1 });
 
             var firstModel = trainer.Fit(trainData);

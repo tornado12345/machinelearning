@@ -5,11 +5,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Transforms;
 
@@ -34,8 +34,33 @@ using Microsoft.ML.Transforms;
 namespace Microsoft.ML.Transforms
 {
     /// <summary>
-    /// The ColumnSelectingEstimator supports selection of specified columns to keep from a given input.
+    /// Keeps or drops selected columns from an <see cref="IDataView"/>.
     /// </summary>
+    /// <remarks>
+    /// <format type="text/markdown"><![CDATA[
+    ///
+    /// ###  Estimator Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Does this estimator need to look at the data to train its parameters? | No |
+    /// | Input columns data type | Any |
+    /// | Exportable to ONNX | Yes |
+    ///
+    /// The resulting <xref:Microsoft.ML.Transforms.ColumnSelectingTransformer>
+    /// operates on the schema of a given <xref:Microsoft.ML.IDataView> by dropping or keeping selected columns from the schema.
+    ///
+    /// It is commonly used to remove unwanted columns before serializing a dataset or writing it to a file.
+    /// It is not necessary to drop unused columns before training or performing transforms,
+    /// as the <xref:Microsoft.ML.IDataView> is lazily evaluated and will not actually materialize the columns until needed.
+    /// In the case of serialization, every column in the schema will be written out. If there are columns
+    /// that should not be saved, this estimator can be used to remove them.
+    ///
+    /// Check the See Also section for links to usage examples.
+    /// ]]></format>
+    /// </remarks>
+    /// <seealso cref="TransformExtensionsCatalog.DropColumns(TransformsCatalog, string[])"/>
+    /// <seealso cref="TransformExtensionsCatalog.SelectColumns(TransformsCatalog, string[])"/>
+    /// <seealso cref="TransformExtensionsCatalog.SelectColumns(TransformsCatalog, string[], bool)"/>
     public sealed class ColumnSelectingEstimator : TrivialEstimator<ColumnSelectingTransformer>
     {
         [BestFriend]
@@ -120,7 +145,7 @@ namespace Microsoft.ML.Transforms
     }
 
     /// <summary>
-    /// The <see cref="ColumnSelectingTransformer"/> allows the user to specify columns to drop or keep from a given input.
+    /// <see cref="ITransformer"/> resulting from fitting an <see cref="ColumnSelectingEstimator"/>.
     /// </summary>
     public sealed class ColumnSelectingTransformer : ITransformer
     {
@@ -235,7 +260,7 @@ namespace Microsoft.ML.Transforms
         }
 
         /// <summary>
-        /// Back-compatibilty function that handles loading the DropColumns Transform.
+        /// Back-compatibility function that handles loading the DropColumns Transform.
         /// </summary>
         private static ColumnSelectingTransformer LoadDropColumnsTransform(IHostEnvironment env, ModelLoadContext ctx, IDataView input)
         {
@@ -273,7 +298,7 @@ namespace Microsoft.ML.Transforms
         }
 
         /// <summary>
-        /// Back-compatibilty that is handling the HiddenColumnOption from ChooseColumns.
+        /// Back-compatibility that is handling the HiddenColumnOption from ChooseColumns.
         /// </summary>
         private enum HiddenColumnOption : byte
         {
@@ -497,7 +522,7 @@ namespace Microsoft.ML.Transforms
         {
             private readonly IHost _host;
             private readonly DataViewSchema _inputSchema;
-            private readonly int[] _outputToInputMap;
+            public readonly int[] OutputToInputMap;
 
             public DataViewSchema InputSchema => _inputSchema;
 
@@ -508,17 +533,17 @@ namespace Microsoft.ML.Transforms
                 _host = transform._host.Register(nameof(Mapper));
                 _inputSchema = inputSchema;
 
-                _outputToInputMap = BuildOutputToInputMap(transform.SelectColumns,
+                OutputToInputMap = BuildOutputToInputMap(transform.SelectColumns,
                                                             transform.KeepColumns,
                                                             transform.KeepHidden,
                                                             _inputSchema);
-                OutputSchema = GenerateOutputSchema(_outputToInputMap, _inputSchema);
+                OutputSchema = GenerateOutputSchema(OutputToInputMap, _inputSchema);
             }
 
             public int GetInputIndex(int outputIndex)
             {
-                _host.Assert(0 <= outputIndex && outputIndex < _outputToInputMap.Length);
-                return _outputToInputMap[outputIndex];
+                _host.Assert(0 <= outputIndex && outputIndex < OutputToInputMap.Length);
+                return OutputToInputMap[outputIndex];
             }
 
             private static int[] BuildOutputToInputMap(IEnumerable<string> selectedColumns,
@@ -625,7 +650,7 @@ namespace Microsoft.ML.Transforms
             public override bool IsColumnActive(DataViewSchema.Column column) => true;
         }
 
-        private sealed class SelectColumnsDataTransform : IDataTransform, IRowToRowMapper, ITransformTemplate
+        private sealed class SelectColumnsDataTransform : IDataTransform, IRowToRowMapper, ITransformTemplate, ITransformCanSaveOnnx
         {
             private readonly IHost _host;
             private readonly ColumnSelectingTransformer _transform;
@@ -702,6 +727,28 @@ namespace Microsoft.ML.Transforms
 
             IDataTransform ITransformTemplate.ApplyToData(IHostEnvironment env, IDataView newSource)
                 => new SelectColumnsDataTransform(env, _transform, new Mapper(_transform, newSource.Schema), newSource);
+
+            public bool CanSaveOnnx(OnnxContext ctx) => true;
+
+            public void SaveAsOnnx(OnnxContext ctx)
+            {
+                const int minimumOpSetVersion = 9;
+                ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
+
+                var outputToInputMap = _mapper.OutputToInputMap;
+                for(int i = 0; i < outputToInputMap.Length; i++)
+                {
+                    var srcCol = InputSchema[outputToInputMap[i]];
+                    var dstCol = OutputSchema[i];
+                    if (!ctx.ContainsColumn(srcCol.Name) || dstCol.IsHidden)
+                        continue;
+
+                    var srcVariable = ctx.GetVariableName(srcCol.Name);
+                    var dstVariable = ctx.AddIntermediateVariable(dstCol.Type, dstCol.Name);
+                    string opType = "Identity";
+                    ctx.CreateNode(opType, srcVariable, dstVariable, ctx.GetNodeName(opType), "");
+                }
+            }
         }
 
         private sealed class Cursor : SynchronizedCursorBase

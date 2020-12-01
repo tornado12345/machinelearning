@@ -7,11 +7,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Transforms.Text;
 
@@ -30,7 +30,7 @@ using Microsoft.ML.Transforms.Text;
 namespace Microsoft.ML.Transforms.Text
 {
     /// <summary>
-    /// Character-oriented tokenizer where text is considered a sequence of characters.
+    /// <see cref="ITransformer"/> resulting from fitting a <see cref="TokenizingByCharactersEstimator"/>.
     /// </summary>
     public sealed class TokenizingByCharactersTransformer : OneToOneTransformerBase
     {
@@ -102,7 +102,8 @@ namespace Microsoft.ML.Transforms.Text
         /// Tokenize incoming text in input columns and output the tokens as output columns.
         /// </summary>
         /// <param name="env">The environment.</param>
-        /// <param name="useMarkerCharacters">Whether to use marker characters to separate words.</param>
+        /// <param name="useMarkerCharacters">Whether to prepend a marker character, <see langword="0x02"/>, to the beginning,
+        /// and append another marker character, <see langword="0x03"/>, to the end of the output vector of characters.</param>
         /// <param name="columns">Pairs of columns to run the tokenization on.</param>
         internal TokenizingByCharactersTransformer(IHostEnvironment env, bool useMarkerCharacters = TokenizingByCharactersEstimator.Defaults.UseMarkerCharacters,
             params (string outputColumnName, string inputColumnName)[] columns) :
@@ -114,7 +115,7 @@ namespace Microsoft.ML.Transforms.Text
         /// <summary>
         /// The names of the output and input column pairs on which the transformation is applied.
         /// </summary>
-        public IReadOnlyCollection<(string outputColumnName, string inputColumnName)> Columns => ColumnPairs.AsReadOnly();
+        internal IReadOnlyCollection<(string outputColumnName, string inputColumnName)> Columns => ColumnPairs.AsReadOnly();
 
         private protected override void CheckInputColumn(DataViewSchema inputSchema, int col, int srcCol)
         {
@@ -184,11 +185,12 @@ namespace Microsoft.ML.Transforms.Text
 
         private protected override IRowMapper MakeRowMapper(DataViewSchema schema) => new Mapper(this, schema);
 
-        private sealed class Mapper : OneToOneMapperBase
+        private sealed class Mapper : OneToOneMapperBase, ISaveAsOnnx
         {
             private readonly DataViewType _type;
             private readonly TokenizingByCharactersTransformer _parent;
             private readonly bool[] _isSourceVector;
+            private readonly int[] _sourceVectorLength;
             // Constructed and cached the first time it is needed.
             private volatile string _keyValuesStr;
             private volatile int[] _keyValuesBoundaries;
@@ -197,11 +199,73 @@ namespace Microsoft.ML.Transforms.Text
              : base(parent.Host.Register(nameof(Mapper)), parent, inputSchema)
             {
                 _parent = parent;
-                var keyType = new KeyType(typeof(ushort), CharsCount);
-                _type = new VectorType(keyType);
+                var keyType = new KeyDataViewType(typeof(ushort), CharsCount);
+                _type = new VectorDataViewType(keyType);
                 _isSourceVector = new bool[_parent.ColumnPairs.Length];
+                _sourceVectorLength = new int[_parent.ColumnPairs.Length];
                 for (int i = 0; i < _isSourceVector.Length; i++)
-                    _isSourceVector[i] = inputSchema[_parent.ColumnPairs[i].inputColumnName].Type is VectorType;
+                {
+                    var type = inputSchema[_parent.ColumnPairs[i].inputColumnName].Type;
+                    _isSourceVector[i] = type is VectorDataViewType;
+                    _sourceVectorLength[i] = type.GetValueCount();
+                }
+            }
+
+            public bool CanSaveOnnx(OnnxContext ctx) => true;
+
+            public void SaveAsOnnx(OnnxContext ctx)
+            {
+                Host.CheckValue(ctx, nameof(ctx));
+                for (int iinfo = 0; iinfo < _isSourceVector.Length; ++iinfo)
+                {
+                    string inputColumnName = _parent.ColumnPairs[iinfo].inputColumnName;
+                    if (!ctx.ContainsColumn(inputColumnName))
+                        continue;
+
+                    string outputColumnName = _parent.ColumnPairs[iinfo].outputColumnName;
+                    string srcVariableName = ctx.GetVariableName(inputColumnName);
+                    string dstVariableName = ctx.AddIntermediateVariable(_type, outputColumnName, true);
+                    SaveAsOnnxCore(ctx, iinfo, srcVariableName, dstVariableName);
+                }
+            }
+
+            private void SaveAsOnnxCore(OnnxContext ctx, int iinfo, string srcVariableName, string dstVariableName)
+            {
+                const int minimumOpSetVersion = 9;
+                ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
+
+                string opType = "Tokenizer";
+                DataViewType dataViewType;
+                if (_isSourceVector[iinfo])
+                    dataViewType = new VectorDataViewType(TextDataViewType.Instance, _sourceVectorLength[iinfo]);
+                else
+                    dataViewType = TextDataViewType.Instance;
+
+                string tokenizerOutput = ctx.AddIntermediateVariable(dataViewType, "TokenizerOutput", true);
+                var node = ctx.CreateNode(opType, srcVariableName, tokenizerOutput, ctx.GetNodeName(opType), "com.microsoft");
+                node.AddAttribute("mark", _parent._useMarkerChars);
+                node.AddAttribute("mincharnum", 1);
+                node.AddAttribute("pad_value", "");
+                node.AddAttribute("separators", new string[] { "" });
+
+                opType = "Squeeze";
+                var squeezeOutput = ctx.AddIntermediateVariable(dataViewType, "SqueezeOutput");
+                node = ctx.CreateNode(opType, tokenizerOutput, squeezeOutput, ctx.GetNodeName(opType), "");
+                node.AddAttribute("axes", new long[] { 1 });
+
+                opType = "LabelEncoder";
+                var labelEncoderOutput = ctx.AddIntermediateVariable(NumberDataViewType.Int64, "LabelEncoderOutput");
+                node = ctx.CreateNode(opType, squeezeOutput, labelEncoderOutput, ctx.GetNodeName(opType));
+
+                IEnumerable<string> charStrings = Enumerable.Range(0, 65535).Select(x => ((char)x).ToString());
+                IEnumerable<long> charValues = Enumerable.Range(0, 65535).Select(x => Convert.ToInt64(x)); ;
+                node.AddAttribute("keys_strings", charStrings);
+                node.AddAttribute("values_int64s", charValues);
+
+                opType = "Cast";
+                var castNode = ctx.CreateNode(opType, labelEncoderOutput, dstVariableName, ctx.GetNodeName(opType), "");
+                var t = InternalDataKindExtensions.ToInternalDataKind(DataKind.UInt16).ToType();
+                castNode.AddAttribute("to", t);
             }
 
             protected override DataViewSchema.DetachedColumn[] GetOutputColumnsCore()
@@ -403,7 +467,7 @@ namespace Microsoft.ML.Transforms.Text
                 Host.Assert(0 <= iinfo && iinfo < _parent.ColumnPairs.Length);
                 disposer = null;
 
-                if (!(input.Schema[_parent.ColumnPairs[iinfo].inputColumnName].Type is VectorType))
+                if (!(input.Schema[_parent.ColumnPairs[iinfo].inputColumnName].Type is VectorDataViewType))
                     return MakeGetterOne(input, iinfo);
                 return MakeGetterVec(input, iinfo);
             }
@@ -547,17 +611,41 @@ namespace Microsoft.ML.Transforms.Text
     }
 
     /// <summary>
-    /// Character tokenizer splits text into sequences of characters using a sliding window.
+    /// <see cref="IEstimator{TTransformer}"/> for the <see cref="TokenizingByCharactersTransformer"/>.
     /// </summary>
+    /// <remarks>
+    /// <format type="text/markdown"><![CDATA[
+    ///
+    /// ###  Estimator Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Does this estimator need to look at the data to train its parameters? | Yes |
+    /// | Input column data type | Scalar or Vector of [Text](xref:Microsoft.ML.Data.TextDataViewType)  |
+    /// | Output column data type | Variable-sized vector of [key](xref:Microsoft.ML.Data.KeyDataViewType) type. |
+    /// | Exportable to ONNX | Yes |
+    ///
+    /// The estimator tokenizes characters by splitting text into sequences of characters using a sliding window.
+    /// During training, the estimator builds a key-value pair dictionary with the encountered sequences of characters.
+    ///
+    /// The <xref:Microsoft.ML.Transforms.Text.TokenizingByCharactersTransformer> resulting from fitting the estimator
+    /// creates a new column, named as specified in the output column name parameters, which contains the keys of the
+    /// sequences of characters that were encountered in the input.
+    ///
+    /// Check the See Also section for links to usage examples.
+    /// ]]>
+    /// </format>
+    /// </remarks>
+    /// <seealso cref="TextCatalog.TokenizeIntoCharactersAsKeys(TransformsCatalog.TextTransforms, string, string, bool)" />
     public sealed class TokenizingByCharactersEstimator : TrivialEstimator<TokenizingByCharactersTransformer>
     {
         internal static class Defaults
         {
             public const bool UseMarkerCharacters = true;
         }
+
         internal static bool IsColumnTypeValid(DataViewType type) => type.GetItemType() is TextDataViewType;
 
-        internal const string ExpectedColumnType = "Text";
+        internal const string ExpectedColumnType = "String";
 
         /// <summary>
         /// Tokenize incoming text in <paramref name="inputColumnName"/> and output the tokens as <paramref name="outputColumnName"/>.
@@ -565,7 +653,8 @@ namespace Microsoft.ML.Transforms.Text
         /// <param name="env">The environment.</param>
         /// <param name="outputColumnName">Name of the column resulting from the transformation of <paramref name="inputColumnName"/>.</param>
         /// <param name="inputColumnName">Name of the column to transform. If set to <see langword="null"/>, the value of the <paramref name="outputColumnName"/> will be used as source.</param>
-        /// <param name="useMarkerCharacters">Whether to use marker characters to separate words.</param>
+        /// <param name="useMarkerCharacters">Whether to prepend a marker character, <see langword="0x02"/>, to the beginning,
+        /// and append another marker character, <see langword="0x03"/>, to the end of the output vector of characters.</param>
         internal TokenizingByCharactersEstimator(IHostEnvironment env, string outputColumnName, string inputColumnName = null,
             bool useMarkerCharacters = Defaults.UseMarkerCharacters)
             : this(env, useMarkerCharacters, new[] { (outputColumnName, inputColumnName ?? outputColumnName) })
@@ -576,7 +665,8 @@ namespace Microsoft.ML.Transforms.Text
         /// Tokenize incoming text in input columns and output the tokens as output columns.
         /// </summary>
         /// <param name="env">The environment.</param>
-        /// <param name="useMarkerCharacters">Whether to use marker characters to separate words.</param>
+        /// <param name="useMarkerCharacters">Whether to prepend a marker character, <see langword="0x02"/>, to the beginning,
+        /// and append another marker character, <see langword="0x03"/>, to the end of the output vector of characters.</param>
         /// <param name="columns">Pairs of columns to run the tokenization on.</param>
 
         internal TokenizingByCharactersEstimator(IHostEnvironment env, bool useMarkerCharacters = Defaults.UseMarkerCharacters,

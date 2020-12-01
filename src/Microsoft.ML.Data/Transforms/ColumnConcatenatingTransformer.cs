@@ -6,7 +6,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -34,8 +33,7 @@ namespace Microsoft.ML.Data
     using PfaType = PfaUtils.Type;
 
     /// <summary>
-    /// Concatenates columns in an <see cref="IDataView"/> into one single column. Please see <see cref="ColumnConcatenatingEstimator"/> for
-    /// constructing <see cref="ColumnConcatenatingTransformer"/>.
+    /// <see cref="ITransformer"/> resulting from fitting an <see cref="ColumnConcatenatingEstimator"/>.
     /// </summary>
     public sealed class ColumnConcatenatingTransformer : RowToRowTransformerBase
     {
@@ -470,7 +468,7 @@ namespace Microsoft.ML.Data
                     sources[i] = srcCol;
 
                     var curType = inputSchema[srcCol].Type;
-                    VectorType curVectorType = curType as VectorType;
+                    VectorDataViewType curVectorType = curType as VectorDataViewType;
 
                     DataViewType currentItemType = curVectorType?.ItemType ?? curType;
                     int currentValueCount = curVectorType?.Size ?? 1;
@@ -514,7 +512,7 @@ namespace Microsoft.ML.Data
                     hasSlotNames = false;
                 }
 
-                return new BoundColumn(InputSchema, _parent._columns[iinfo], sources, new VectorType((PrimitiveDataViewType)itemType, totalSize),
+                return new BoundColumn(InputSchema, _parent._columns[iinfo], sources, new VectorDataViewType((PrimitiveDataViewType)itemType, totalSize),
                     isNormalized, hasSlotNames, hasCategoricals, totalSize, catCount);
             }
 
@@ -523,12 +521,18 @@ namespace Microsoft.ML.Data
             /// </summary>
             private sealed class BoundColumn
             {
+                private static readonly FuncInstanceMethodInfo1<BoundColumn, DataViewRow, Delegate> _makeIdentityGetterMethodInfo
+                    = FuncInstanceMethodInfo1<BoundColumn, DataViewRow, Delegate>.Create(target => target.MakeIdentityGetter<int>);
+
+                private static readonly FuncInstanceMethodInfo1<BoundColumn, DataViewRow, Delegate> _makeGetterMethodInfo
+                    = FuncInstanceMethodInfo1<BoundColumn, DataViewRow, Delegate>.Create(target => target.MakeGetter<int>);
+
                 public readonly int[] SrcIndices;
 
                 private readonly ColumnOptions _columnOptions;
                 private readonly DataViewType[] _srcTypes;
 
-                public readonly VectorType OutputType;
+                public readonly VectorDataViewType OutputType;
 
                 // Fields pertaining to column metadata.
                 private readonly bool _isIdentity;
@@ -536,12 +540,12 @@ namespace Microsoft.ML.Data
                 private readonly bool _hasSlotNames;
                 private readonly bool _hasCategoricals;
 
-                private readonly VectorType _slotNamesType;
+                private readonly VectorDataViewType _slotNamesType;
                 private readonly DataViewType _categoricalRangeType;
 
                 private readonly DataViewSchema _inputSchema;
 
-                public BoundColumn(DataViewSchema inputSchema, ColumnOptions columnOptions, int[] sources, VectorType outputType,
+                public BoundColumn(DataViewSchema inputSchema, ColumnOptions columnOptions, int[] sources, VectorDataViewType outputType,
                     bool isNormalized, bool hasSlotNames, bool hasCategoricals, int slotCount, int catCount)
                 {
                     _columnOptions = columnOptions;
@@ -552,7 +556,7 @@ namespace Microsoft.ML.Data
 
                     _inputSchema = inputSchema;
 
-                    _isIdentity = SrcIndices.Length == 1 && _inputSchema[SrcIndices[0]].Type is VectorType;
+                    _isIdentity = SrcIndices.Length == 1 && _inputSchema[SrcIndices[0]].Type is VectorDataViewType;
                     _isNormalized = isNormalized;
 
                     _hasSlotNames = hasSlotNames;
@@ -632,18 +636,18 @@ namespace Microsoft.ML.Data
                         Contracts.Assert(_columnOptions.Sources[i].alias != "");
                         var colName = _inputSchema[colSrc].Name;
                         var nameSrc = _columnOptions.Sources[i].alias ?? colName;
-                        if (!(typeSrc is VectorType vectorTypeSrc))
+                        if (!(typeSrc is VectorDataViewType vectorTypeSrc))
                         {
                             bldr.AddFeature(slot++, nameSrc.AsMemory());
                             continue;
                         }
 
                         Contracts.Assert(vectorTypeSrc.IsKnownSize);
-                        VectorType typeNames = null;
+                        VectorDataViewType typeNames = null;
 
                         var inputMetadata = _inputSchema[colSrc].Annotations;
                         if (inputMetadata != null && inputMetadata.Schema.TryGetColumnIndex(AnnotationUtils.Kinds.SlotNames, out int idx))
-                            typeNames = inputMetadata.Schema[idx].Type as VectorType;
+                            typeNames = inputMetadata.Schema[idx].Type as VectorDataViewType;
 
                         if (typeNames != null && typeNames.Size == vectorTypeSrc.Size && typeNames.ItemType is TextDataViewType)
                         {
@@ -671,9 +675,9 @@ namespace Microsoft.ML.Data
                 public Delegate MakeGetter(DataViewRow input)
                 {
                     if (_isIdentity)
-                        return Utils.MarshalInvoke(MakeIdentityGetter<int>, OutputType.RawType, input);
+                        return Utils.MarshalInvoke(_makeIdentityGetterMethodInfo, this, OutputType.RawType, input);
 
-                    return Utils.MarshalInvoke(MakeGetter<int>, OutputType.ItemType.RawType, input);
+                    return Utils.MarshalInvoke(_makeGetterMethodInfo, this, OutputType.ItemType.RawType, input);
                 }
 
                 private Delegate MakeIdentityGetter<T>(DataViewRow input)
@@ -691,7 +695,7 @@ namespace Microsoft.ML.Data
                     {
                         var column = input.Schema[SrcIndices[j]];
 
-                        if (_srcTypes[j] is VectorType)
+                        if (_srcTypes[j] is VectorDataViewType)
                             srcGetterVecs[j] = input.GetGetter<VBuffer<T>>(column);
                         else
                             srcGetterOnes[j] = input.GetGetter<T>(column);
@@ -706,7 +710,7 @@ namespace Microsoft.ML.Data
                         for (int i = 0; i < SrcIndices.Length; i++)
                         {
                             var type = _srcTypes[i];
-                            if (type is VectorType vectorType)
+                            if (type is VectorDataViewType vectorType)
                             {
                                 srcGetterVecs[i](ref tmpBufs[i]);
                                 if (vectorType.Size != 0 && vectorType.Size != tmpBufs[i].Length)
@@ -735,7 +739,7 @@ namespace Microsoft.ML.Data
                             for (int j = 0; j < SrcIndices.Length; j++)
                             {
                                 Contracts.Assert(offset < dstLength);
-                                if (_srcTypes[j] is VectorType)
+                                if (_srcTypes[j] is VectorDataViewType)
                                 {
                                     var buffer = tmpBufs[j];
                                     var bufferValues = buffer.GetValues();
@@ -782,7 +786,7 @@ namespace Microsoft.ML.Data
                             for (int j = 0; j < SrcIndices.Length; j++)
                             {
                                 Contracts.Assert(tmpBufs[j].Length <= dstLength - offset);
-                                if (_srcTypes[j] is VectorType)
+                                if (_srcTypes[j] is VectorDataViewType)
                                 {
                                     tmpBufs[j].CopyTo(editor.Values, offset);
                                     offset += tmpBufs[j].Length;
@@ -898,7 +902,9 @@ namespace Microsoft.ML.Data
                 Host.CheckValue(ctx, nameof(ctx));
                 Contracts.Assert(CanSaveOnnx(ctx));
 
-                string opType = "FeatureVectorizer";
+                const int minimumOpSetVersion = 9;
+                ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
+
                 for (int iinfo = 0; iinfo < _columns.Length; ++iinfo)
                 {
                     var colInfo = _parent._columns[iinfo];
@@ -906,7 +912,7 @@ namespace Microsoft.ML.Data
 
                     string outName = colInfo.Name;
                     var outColType = boundCol.OutputType;
-                    if (!outColType.IsKnownSize)
+                    if ((!outColType.IsKnownSize) || (!(outColType.GetItemType() is NumberDataViewType)))
                     {
                         ctx.RemoveColumn(outName, false);
                         continue;
@@ -927,10 +933,19 @@ namespace Microsoft.ML.Data
                             InputSchema[srcIndex].Type.GetValueCount()));
                     }
 
+                    string opType = "FeatureVectorizer";
+                    int outVectorSize = (int)inputList.Sum(x => x.Value);
+                    var vectorizerOutputType = new VectorDataViewType(NumberDataViewType.Single, outVectorSize);
+                    var vectorizerOutputName = ctx.AddIntermediateVariable(vectorizerOutputType, "VectorFeaturizerOutput");
                     var node = ctx.CreateNode(opType, inputList.Select(t => t.Key),
-                        new[] { ctx.AddIntermediateVariable(outColType, outName) }, ctx.GetNodeName(opType));
-
+                        new[] { vectorizerOutputName }, ctx.GetNodeName(opType));
                     node.AddAttribute("inputdimensions", inputList.Select(x => x.Value));
+
+                    opType = "Cast";
+                    var dstVectorType = new VectorDataViewType(outColType.GetItemType() as PrimitiveDataViewType, outVectorSize);
+                    var dstVariableName = ctx.AddIntermediateVariable(dstVectorType, outName);
+                    var castNode = ctx.CreateNode(opType, vectorizerOutputName, dstVariableName, ctx.GetNodeName(opType), "");
+                    castNode.AddAttribute("to", outColType.ItemType.RawType);
                 }
             }
         }

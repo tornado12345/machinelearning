@@ -6,8 +6,10 @@ using System;
 using System.IO;
 using Microsoft.ML.Data;
 using Microsoft.ML.Runtime;
+using Microsoft.ML.Transforms;
+using Microsoft.ML.Transforms.Onnx;
 
-namespace Microsoft.ML.Transforms
+namespace Microsoft.ML
 {
     /// <summary>
     /// This is an extension method to be used with the <see cref="DnnImageFeaturizerEstimator"/> in order to use a pretrained ResNet101 model.
@@ -29,7 +31,7 @@ namespace Microsoft.ML.Transforms
         /// <summary>
         /// This allows a custom model location to be specified. This is useful is a custom model is specified,
         /// or if the model is desired to be placed or shipped separately in a different folder from the main application. Note that because Onnx models
-        /// must be in a directory all by themsleves for the OnnxTransformer to work, this method appends a ResNet101Onnx/ResNetPrepOnnx subdirectory
+        /// must be in a directory all by themselves for the OnnxTransformer to work, this method appends a ResNet101Onnx/ResNetPrepOnnx subdirectory
         /// to the passed in directory to prevent having to make that directory manually each time.
         /// </summary>
         public static EstimatorChain<ColumnCopyingTransformer> ResNet101(this DnnImageModelSelector dnnModelContext, IHostEnvironment env, string outputColumnName, string inputColumnName, string modelDir)

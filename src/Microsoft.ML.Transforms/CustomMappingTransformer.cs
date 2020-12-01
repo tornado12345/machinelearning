@@ -4,7 +4,6 @@
 
 using System;
 using System.Linq;
-using Microsoft.Data.DataView;
 using Microsoft.ML.Data;
 using Microsoft.ML.Internal.Utilities;
 using Microsoft.ML.Runtime;
@@ -12,9 +11,7 @@ using Microsoft.ML.Runtime;
 namespace Microsoft.ML.Transforms
 {
     /// <summary>
-    /// This transform generates additional columns to the provided <see cref="IDataView"/>.
-    /// It doesn't change the number of rows, and can be seen as a result of application of the user's function
-    /// to every row of the input data.
+    /// <see cref="ITransformer"/> resulting from fitting an <see cref="CustomMappingEstimator{TSrc, TDst}"/>.
     /// </summary>
     /// <typeparam name="TSrc">The type that describes what 'source' columns are consumed from the input <see cref="IDataView"/>.</typeparam>
     /// <typeparam name="TDst">The type that describes what new columns are added by this transform.</typeparam>
@@ -25,6 +22,7 @@ namespace Microsoft.ML.Transforms
         private readonly IHost _host;
         private readonly Action<TSrc, TDst> _mapAction;
         private readonly string _contractName;
+        private readonly string _contractAssembly;
 
         internal InternalSchemaDefinition AddedSchema { get; }
         internal SchemaDefinition InputSchemaDefinition { get; }
@@ -61,6 +59,7 @@ namespace Microsoft.ML.Transforms
                : InternalSchemaDefinition.Create(typeof(TDst), outputSchemaDefinition);
 
             _contractName = contractName;
+            _contractAssembly = _mapAction.Method.DeclaringType.Assembly.FullName;
             AddedSchema = outSchema;
         }
 
@@ -70,7 +69,7 @@ namespace Microsoft.ML.Transforms
         {
             if (_contractName == null)
                 throw _host.Except("Empty contract name for a transform: the transform cannot be saved");
-            LambdaTransform.SaveCustomTransformer(_host, ctx, _contractName);
+            LambdaTransform.SaveCustomTransformer(_host, ctx, _contractName, _contractAssembly);
         }
 
         /// <summary>
@@ -204,12 +203,30 @@ namespace Microsoft.ML.Transforms
     }
 
     /// <summary>
-    /// The <see cref="IEstimator{TTransformer}"/> to define a custom mapping of rows of an <see cref="IDataView"/>.
-    /// For usage details, please see <see cref="CustomMappingCatalog.CustomMapping"/>
+    /// Applies a custom mapping function to the specified input columns. The result will be in output columns.
     /// </summary>
     /// <remarks>
-    /// Calling <see cref="IEstimator{TTransformer}.Fit(IDataView)"/> in this estimator, produces an <see cref="CustomMappingTransformer{TSrc, TDst}"/>.
+    /// <format type="text/markdown"><![CDATA[
+    ///
+    /// ###  Estimator Characteristics
+    /// |  |  |
+    /// | -- | -- |
+    /// | Does this estimator need to look at the data to train its parameters? | No |
+    /// | Input column data type | Any |
+    /// | Output column data type | Any |
+    /// | Exportable to ONNX | No |
+    ///
+    /// The resulting <xref:Microsoft.ML.Transforms.CustomMappingTransformer`2> applies a user defined mapping
+    /// to one or more input columns and produces one or more output columns. This transformation doesn't change the number of rows,
+    /// and can be seen as the result of applying the user's function to every row of the input data.
+    ///
+    /// The provided custom function must be thread-safe and free from side effects.
+    /// The order with which it is applied to the rows of data cannot be guaranteed.
+    ///
+    /// Check the See Also section for links to usage examples.
+    /// ]]></format>
     /// </remarks>
+    /// <seealso cref="CustomMappingCatalog.CustomMapping{TSrc, TDst}(TransformsCatalog, Action{TSrc, TDst}, string, SchemaDefinition, SchemaDefinition)"/>
     public sealed class CustomMappingEstimator<TSrc, TDst> : TrivialEstimator<CustomMappingTransformer<TSrc, TDst>>
         where TSrc : class, new()
         where TDst : class, new()

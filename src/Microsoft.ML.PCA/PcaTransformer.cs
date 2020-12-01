@@ -5,13 +5,13 @@
 using System;
 using System.Linq;
 using System.Text;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
 using Microsoft.ML.EntryPoints;
 using Microsoft.ML.Internal.CpuMath;
 using Microsoft.ML.Internal.Utilities;
+using Microsoft.ML.Model.OnnxConverter;
 using Microsoft.ML.Numeric;
 using Microsoft.ML.Runtime;
 using Microsoft.ML.Transforms;
@@ -103,7 +103,7 @@ namespace Microsoft.ML.Transforms
             public float[][] Eigenvectors;
             public float[] MeanProjected;
 
-            public DataViewType OutputType => new VectorType(NumberDataViewType.Single, Rank);
+            public DataViewType OutputType => new VectorDataViewType(NumberDataViewType.Single, Rank);
 
             public TransformInfo(int rank, int dim)
             {
@@ -508,11 +508,11 @@ namespace Microsoft.ML.Transforms
         {
             string inputSchema; // just used for the excpections
 
-            if (!(type is VectorType vectorType && vectorType.Size > 1 && vectorType.ItemType.Equals(NumberDataViewType.Single)))
-                throw ectx.ExceptSchemaMismatch(nameof(inputSchema), "input", name, "known-size vector of float of two or more items", type.ToString());
+            if (!(type is VectorDataViewType vectorType && vectorType.Size > 1 && vectorType.ItemType.Equals(NumberDataViewType.Single)))
+                throw ectx.ExceptSchemaMismatch(nameof(inputSchema), "input", name, "known-size vector of Single of two or more items", type.ToString());
         }
 
-        private sealed class Mapper : OneToOneMapperBase
+        private sealed class Mapper : OneToOneMapperBase, ISaveAsOnnx
         {
             public sealed class ColumnSchemaInfo
             {
@@ -553,7 +553,7 @@ namespace Microsoft.ML.Transforms
                     if (colSchemaInfo.InputType.GetVectorSize() != _parent._transformInfos[i].Dimension)
                     {
                         throw Host.ExceptSchemaMismatch(nameof(inputSchema), "input", colPair.inputColumnName,
-                            new VectorType(NumberDataViewType.Single, _parent._transformInfos[i].Dimension).ToString(), colSchemaInfo.InputType.ToString());
+                            new VectorDataViewType(NumberDataViewType.Single, _parent._transformInfos[i].Dimension).ToString(), colSchemaInfo.InputType.ToString());
                     }
                 }
             }
@@ -597,6 +597,82 @@ namespace Microsoft.ML.Transforms
 
                 dst = editor.Commit();
             }
+
+            public bool CanSaveOnnx(OnnxContext ctx) => true;
+
+            public void SaveAsOnnx(OnnxContext ctx)
+            {
+                Host.CheckValue(ctx, nameof(ctx));
+
+                for (int i = 0; i < _numColumns; i++)
+                {
+                    var colPair = _parent.ColumnPairs[i];
+                    var transformInfo = _parent._transformInfos[i];
+                    string inputColumnName = colPair.inputColumnName;
+                    string outputColumnName = colPair.outputColumnName;
+                    if (!ctx.ContainsColumn(inputColumnName))
+                    {
+                        ctx.RemoveColumn(colPair.outputColumnName, false);
+                        continue;
+                    }
+
+                    var dstVariableName = ctx.AddIntermediateVariable(transformInfo.OutputType, outputColumnName);
+                    SaveAsOnnxCore(ctx, i, ctx.GetVariableName(inputColumnName), dstVariableName);
+                }
+            }
+
+            private void SaveAsOnnxCore(OnnxContext ctx, int iinfo, string srcVariableName, string dstVariableName)
+            {
+                Host.CheckValue(ctx, nameof(ctx));
+
+                const int minimumOpSetVersion = 9;
+                ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
+
+                TransformInfo transformInfo = _parent._transformInfos[iinfo];
+
+                // When the transformer is loaded from a model file,
+                // _schemaInfos does not exist. Infer the input type
+                // from the transformInfo dimension.
+                DataViewType inputType = (_parent._schemaInfos != null) ?
+                                          _parent._schemaInfos[iinfo].InputType :
+                                          new VectorDataViewType(NumberDataViewType.Single, transformInfo.Dimension);
+
+                float[] principalComponents = new float[transformInfo.Rank * transformInfo.Dimension];
+                for (int i = 0; i < transformInfo.Rank; i++)
+                {
+                    Array.Copy(transformInfo.Eigenvectors[i], 0, principalComponents, i * transformInfo.Dimension, transformInfo.Dimension);
+                }
+                long[] pcaDims = { transformInfo.Rank, transformInfo.Dimension };
+                var pcaMatrix = ctx.AddInitializer(principalComponents, pcaDims, "principalComponents");
+
+                float[] zeroMean = new float[transformInfo.Rank];
+                if (transformInfo.MeanProjected != null)
+                {
+                    Array.Copy(transformInfo.MeanProjected, zeroMean, transformInfo.Rank);
+                }
+
+                long[] meanDims = { transformInfo.Rank };
+                var zeroMeanNode = ctx.AddInitializer(zeroMean, meanDims, "meanVector");
+
+                // NB: Hack
+                // Currently ML.NET persists ONNX graphs in proto-buf 3 format but the Onnx runtime uses the proto-buf 2 format
+                // There is an incompatibility between the two where proto-buf 3 does not include variables whose values are zero
+                // In the Gemm node below, we want the srcVariableName matrix to be sent in without a transpose, so transA has to be zero
+                // Due to the incompatibility, we get an exception from the Onnx runtime
+                // To workaround this, we transpose the input data first with the Transpose operator and then use the Gemm operator with transA=1
+                // This should be removed once incompatibility is fixed.
+                string opType;
+                opType = "Transpose";
+                var transposeOutput = ctx.AddIntermediateVariable(inputType, "TransposeOutput", true);
+                var transposeNode = ctx.CreateNode(opType, srcVariableName, transposeOutput, ctx.GetNodeName(opType), "");
+
+                opType = "Gemm";
+                var gemmNode = ctx.CreateNode(opType, new[] { transposeOutput, pcaMatrix, zeroMeanNode }, new[] { dstVariableName }, ctx.GetNodeName(opType), "");
+                gemmNode.AddAttribute("alpha", 1.0);
+                gemmNode.AddAttribute("beta", -1.0);
+                gemmNode.AddAttribute("transA", 1);
+                gemmNode.AddAttribute("transB", 1);
+            }
         }
 
         [TlcModule.EntryPoint(Name = "Transforms.PcaCalculator",
@@ -631,7 +707,8 @@ namespace Microsoft.ML.Transforms
         /// <summary>
         /// Describes how the transformer handles one column pair.
         /// </summary>
-        public sealed class ColumnOptions
+        [BestFriend]
+        internal sealed class ColumnOptions
         {
             /// <summary>
             /// Name of the column resulting from the transformation of <see cref="InputColumnName"/>.

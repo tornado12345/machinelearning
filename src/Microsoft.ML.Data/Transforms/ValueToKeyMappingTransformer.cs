@@ -8,7 +8,6 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
-using Microsoft.Data.DataView;
 using Microsoft.ML;
 using Microsoft.ML.CommandLine;
 using Microsoft.ML.Data;
@@ -35,13 +34,9 @@ using Newtonsoft.Json.Linq;
 
 namespace Microsoft.ML.Transforms
 {
-    // TermTransform builds up term vocabularies (dictionaries).
-    // Notes:
-    // * Each column builds/uses exactly one "vocabulary" (dictionary).
-    // * Output columns are KeyType-valued.
-    // * The Key value is the one-based index of the item in the dictionary.
-    // * Not found is assigned the value zero.
-    /// <include file='doc.xml' path='doc/members/member[@name="TextToKey"]/*' />
+    /// <summary>
+    /// <see cref="ITransformer"/> resulting from fitting a <see cref="ValueToKeyMappingEstimator"/>.
+    /// </summary>
     public sealed partial class ValueToKeyMappingTransformer : OneToOneTransformerBase
     {
         [BestFriend]
@@ -58,7 +53,7 @@ namespace Microsoft.ML.Transforms
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "How items should be ordered when vectorized. By default, they will be in the order encountered. " +
                 "If by value items are sorted according to their default comparison, for example, text sorting will be case sensitive (for example, 'A' then 'Z' then 'a').")]
-            public ValueToKeyMappingEstimator.SortOrder? Sort;
+            public ValueToKeyMappingEstimator.KeyOrdinality? Sort;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Whether key value metadata should be text, regardless of the actual input type", ShortName = "textkv", Hide = true)]
             public bool? TextKeyValues;
@@ -99,10 +94,10 @@ namespace Microsoft.ML.Transforms
         }
 
         [BestFriend]
-        internal abstract class ArgumentsBase : TransformInputBase
+        internal abstract class OptionsBase : TransformInputBase
         {
-            [Argument(ArgumentType.AtMostOnce, HelpText = "Maximum number of terms to keep per column when auto-training", ShortName = "max", SortOrder = 5)]
-            public int MaxNumTerms = ValueToKeyMappingEstimator.Defaults.MaxNumKeys;
+            [Argument(ArgumentType.AtMostOnce, HelpText = "Maximum number of keys to keep per column when auto-training", ShortName = "max", SortOrder = 5)]
+            public int MaxNumTerms = ValueToKeyMappingEstimator.Defaults.MaximumNumberOfKeys;
 
             [Argument(ArgumentType.AtMostOnce, HelpText = "Comma separated list of terms", Name = "Terms", SortOrder = 105, Visibility = ArgumentAttribute.VisibilityType.CmdLineOnly)]
             public string Term;
@@ -127,7 +122,7 @@ namespace Microsoft.ML.Transforms
             // REVIEW: Should we always sort? Opinions are mixed. See work item 7797429.
             [Argument(ArgumentType.AtMostOnce, HelpText = "How items should be ordered when vectorized. By default, they will be in the order encountered. " +
                 "If by value items are sorted according to their default comparison, for example, text sorting will be case sensitive (for example, 'A' then 'Z' then 'a').", SortOrder = 113)]
-            public ValueToKeyMappingEstimator.SortOrder Sort = ValueToKeyMappingEstimator.Defaults.Sort;
+            public ValueToKeyMappingEstimator.KeyOrdinality Sort = ValueToKeyMappingEstimator.Defaults.Ordinality;
 
             // REVIEW: Should we do this here, or correct the various pieces of code here and in MRS etc. that
             // assume key-values will be string? Once we correct these things perhaps we can see about removing it.
@@ -136,7 +131,7 @@ namespace Microsoft.ML.Transforms
         }
 
         [BestFriend]
-        internal sealed class Options : ArgumentsBase
+        internal sealed class Options : OptionsBase
         {
             [Argument(ArgumentType.Multiple, HelpText = "New column definition(s) (optional form: name:src)", Name = "Column", ShortName = "col", SortOrder = 1)]
             public Column[] Columns;
@@ -222,10 +217,10 @@ namespace Microsoft.ML.Transforms
 
         private string TestIsKnownDataKind(DataViewType type)
         {
-            VectorType vectorType = type as VectorType;
+            VectorDataViewType vectorType = type as VectorDataViewType;
             DataViewType itemType = vectorType?.ItemType ?? type;
 
-            if (itemType is KeyType || itemType.IsStandardScalar())
+            if (itemType is KeyDataViewType || itemType.IsStandardScalar())
                 return null;
             return "standard type or a vector of standard type";
         }
@@ -262,7 +257,7 @@ namespace Microsoft.ML.Transforms
                 _unboundMaps = Train(Host, ch, infos, keyData, columns, input, autoConvert);
                 _textMetadata = new bool[_unboundMaps.Length];
                 for (int iinfo = 0; iinfo < columns.Length; ++iinfo)
-                    _textMetadata[iinfo] = columns[iinfo].TextKeyValues;
+                    _textMetadata[iinfo] = columns[iinfo].AddKeyValueAnnotationsAsText;
                 ch.Assert(_unboundMaps.Length == columns.Length);
             }
         }
@@ -285,14 +280,14 @@ namespace Microsoft.ML.Transforms
                 {
                     ch.Warning("Explicit term list specified. Data file arguments will be ignored");
                 }
-                if (!Enum.IsDefined(typeof(ValueToKeyMappingEstimator.SortOrder), options.Sort))
+                if (!Enum.IsDefined(typeof(ValueToKeyMappingEstimator.KeyOrdinality), options.Sort))
                     throw ch.ExceptUserArg(nameof(options.Sort), "Undefined sorting criteria '{0}' detected", options.Sort);
 
                 for (int i = 0; i < cols.Length; i++)
                 {
                     var item = options.Columns[i];
                     var sortOrder = item.Sort ?? options.Sort;
-                    if (!Enum.IsDefined(typeof(ValueToKeyMappingEstimator.SortOrder), sortOrder))
+                    if (!Enum.IsDefined(typeof(ValueToKeyMappingEstimator.KeyOrdinality), sortOrder))
                         throw env.ExceptUserArg(nameof(options.Sort), "Undefined sorting criteria '{0}' detected for column '{1}'", sortOrder, item.Name);
 
                     cols[i] = new ValueToKeyMappingEstimator.ColumnOptions(
@@ -300,9 +295,9 @@ namespace Microsoft.ML.Transforms
                         item.Source ?? item.Name,
                         item.MaxNumTerms ?? options.MaxNumTerms,
                         sortOrder,
-                        item.Terms,
                         item.TextKeyValues ?? options.TextKeyValues);
-                    cols[i].Terms = item.Term ?? options.Term;
+                    cols[i].Keys = item.Terms;
+                    cols[i].Key = item.Term ?? options.Term;
                 };
                 var keyData = GetKeyDataViewOrNull(env, ch, options.DataFile, options.TermsColumn, options.Loader, out bool autoLoaded);
                 return new ValueToKeyMappingTransformer(env, input, cols, keyData, autoLoaded).MakeDataTransform(input);
@@ -374,7 +369,7 @@ namespace Microsoft.ML.Transforms
 
         /// <summary>
         /// Returns a single-column <see cref="IDataView"/>, based on values from <see cref="Options"/>,
-        /// in the case where <see cref="ArgumentsBase.DataFile"/> is set. If that is not set, this will
+        /// in the case where <see cref="OptionsBase.DataFile"/> is set. If that is not set, this will
         /// return <see langword="null"/>.
         /// </summary>
         /// <param name="env">The host environment.</param>
@@ -501,7 +496,11 @@ namespace Microsoft.ML.Transforms
                         e.SetMetric(0, trainer.Count);
                     });
                 while (cursor.MoveNext() && trainer.ProcessRow())
+                {
                     rowCur++;
+                    env.CheckAlive();
+                }
+
                 if (trainer.Count == 0)
                     ch.Warning("Map from the term data resulted in an empty map.");
                 pch.Checkpoint(trainer.Count, rowCur);
@@ -531,14 +530,14 @@ namespace Microsoft.ML.Transforms
             for (int iinfo = 0; iinfo < infos.Length; iinfo++)
             {
                 // First check whether we have a terms argument, and handle it appropriately.
-                var terms = columns[iinfo].Terms.AsMemory();
-                var termsArray = columns[iinfo].TermArray;
+                var terms = columns[iinfo].Key.AsMemory();
+                var termsArray = columns[iinfo].Keys;
 
                 terms = ReadOnlyMemoryUtils.TrimSpaces(terms);
                 if (!terms.IsEmpty || (termsArray != null && termsArray.Length > 0))
                 {
                     // We have terms! Pass it in.
-                    var sortOrder = columns[iinfo].Sort;
+                    var sortOrder = columns[iinfo].KeyOrdinality;
                     var bldr = Builder.Create(infos[iinfo].TypeSrc, sortOrder);
                     if (!terms.IsEmpty)
                         bldr.ParseAddTermArg(ref terms, ch);
@@ -551,7 +550,7 @@ namespace Microsoft.ML.Transforms
                     // First column using this file.
                     if (termsFromFile == null)
                     {
-                        var bldr = Builder.Create(infos[iinfo].TypeSrc, columns[iinfo].Sort);
+                        var bldr = Builder.Create(infos[iinfo].TypeSrc, columns[iinfo].KeyOrdinality);
                         termsFromFile = CreateTermMapFromData(env, ch, keyData, autoConvert, bldr);
                     }
                     if (!termsFromFile.ItemType.Equals(infos[iinfo].TypeSrc.GetItemType()))
@@ -569,7 +568,7 @@ namespace Microsoft.ML.Transforms
                 else
                 {
                     // Auto train this column. Leave the term map null for now, but set the lim appropriately.
-                    lims[iinfo] = columns[iinfo].MaxNumKeys;
+                    lims[iinfo] = columns[iinfo].MaximumNumberOfKeys;
                     ch.CheckUserArg(lims[iinfo] > 0, nameof(Column.MaxNumTerms), "Must be positive");
                     Contracts.Check(trainingData.Schema.TryGetColumnIndex(infos[iinfo].InputColumnName, out int colIndex));
                     Utils.Add(ref toTrain, colIndex);
@@ -597,7 +596,7 @@ namespace Microsoft.ML.Transforms
                     {
                         if (termMap[iinfo] != null)
                             continue;
-                        var bldr = Builder.Create(infos[iinfo].TypeSrc, columns[iinfo].Sort);
+                        var bldr = Builder.Create(infos[iinfo].TypeSrc, columns[iinfo].KeyOrdinality);
                         trainerInfo[itrainer] = iinfo;
                         trainingData.Schema.TryGetColumnIndex(infos[iinfo].InputColumnName, out int colIndex);
                         trainer[itrainer++] = Trainer.Create(cursor, colIndex, false, lims[iinfo], bldr);
@@ -617,6 +616,7 @@ namespace Microsoft.ML.Transforms
                     // We might exit early if all trainers reach their maximum.
                     while (tmin < trainer.Length && cursor.MoveNext())
                     {
+                        env.CheckAlive();
                         rowCur++;
                         for (int t = tmin; t < trainer.Length; ++t)
                         {
@@ -701,6 +701,9 @@ namespace Microsoft.ML.Transforms
 
         private sealed class Mapper : OneToOneMapperBase, ISaveAsOnnx, ISaveAsPfa
         {
+            private static readonly FuncInstanceMethodInfo1<Mapper, DataViewRow, int, Delegate> _makeGetterMethodInfo
+                = FuncInstanceMethodInfo1<Mapper, DataViewRow, int, Delegate>.Create(target => target.MakeGetter<int>);
+
             private readonly DataViewType[] _types;
             private readonly ValueToKeyMappingTransformer _parent;
             private readonly ColInfo[] _infos;
@@ -719,10 +722,10 @@ namespace Microsoft.ML.Transforms
                 for (int i = 0; i < _parent.ColumnPairs.Length; i++)
                 {
                     var type = _infos[i].TypeSrc;
-                    KeyType keyType = _parent._unboundMaps[i].OutputType;
+                    KeyDataViewType keyType = _parent._unboundMaps[i].OutputType;
                     DataViewType colType;
-                    if (type is VectorType vectorType)
-                        colType = new VectorType(keyType, vectorType);
+                    if (type is VectorDataViewType vectorType)
+                        colType = new VectorDataViewType(keyType, vectorType.Dimensions);
                     else
                         colType = keyType;
                     _types[i] = colType;
@@ -756,27 +759,143 @@ namespace Microsoft.ML.Transforms
                 Contracts.Assert(0 <= iinfo && iinfo < _parent.ColumnPairs.Length);
                 disposer = null;
                 var type = _termMap[iinfo].Map.OutputType;
-                return Utils.MarshalInvoke(MakeGetter<int>, type.RawType, input, iinfo);
+                return Utils.MarshalInvoke(_makeGetterMethodInfo, this, type.RawType, input, iinfo);
             }
 
             private Delegate MakeGetter<T>(DataViewRow row, int src) => _termMap[src].GetMappingGetter(row);
 
+            private IEnumerable<T> GetTermsAndIds<T>(int iinfo, out long[] termIds)
+            {
+                var terms = default(VBuffer<T>);
+                var map = (TermMap<T>)_termMap[iinfo].Map;
+                map.GetTerms(ref terms);
+
+                var termValues = terms.DenseValues();
+                var keyMapper = map.GetKeyMapper();
+
+                int i = 0;
+                termIds = new long[map.Count];
+                foreach (var term in termValues)
+                {
+                    uint id = 0;
+                    keyMapper(term, ref id);
+                    termIds[i++] = id;
+                }
+                return termValues;
+            }
+
+            private void CastInputToString<T>(OnnxContext ctx, out OnnxNode node, out long[] termIds, string srcVariableName, int iinfo,
+                string opType, string labelEncoderOutput)
+            {
+                var srcShape = ctx.RetrieveShapeOrNull(srcVariableName);
+                var castOutput = ctx.AddIntermediateVariable(new VectorDataViewType(TextDataViewType.Instance, (int)srcShape[1]), "castOutput");
+                var castNode = ctx.CreateNode("Cast", srcVariableName, castOutput, ctx.GetNodeName("Cast"), "");
+                var t = InternalDataKindExtensions.ToInternalDataKind(DataKind.String).ToType();
+                castNode.AddAttribute("to", t);
+                node = ctx.CreateNode(opType, castOutput, labelEncoderOutput, ctx.GetNodeName(opType));
+                var terms = GetTermsAndIds<T>(iinfo, out termIds);
+                node.AddAttribute("keys_strings", terms.Select(item => item.ToString()));
+            }
+
+            private void CastInputToFloat<T>(OnnxContext ctx, out OnnxNode node, out long[] termIds, string srcVariableName, int iinfo,
+                string opType, string labelEncoderOutput)
+            {
+                var srcShape = ctx.RetrieveShapeOrNull(srcVariableName);
+                var castOutput = ctx.AddIntermediateVariable(new VectorDataViewType(NumberDataViewType.Single, (int)srcShape[1]), "castOutput");
+                var castNode = ctx.CreateNode("Cast", srcVariableName, castOutput, ctx.GetNodeName("Cast"), "");
+                var t = InternalDataKindExtensions.ToInternalDataKind(DataKind.Single).ToType();
+                castNode.AddAttribute("to", t);
+                node = ctx.CreateNode(opType, castOutput, labelEncoderOutput, ctx.GetNodeName(opType));
+                var terms = GetTermsAndIds<T>(iinfo, out termIds);
+                node.AddAttribute("keys_floats", terms.Select(item => Convert.ToSingle(item)));
+            }
+
             private bool SaveAsOnnxCore(OnnxContext ctx, int iinfo, ColInfo info, string srcVariableName, string dstVariableName)
             {
-                if (!(info.TypeSrc.GetItemType() is TextDataViewType))
-                    return false;
+                const int minimumOpSetVersion = 9;
+                ctx.CheckOpSetVersion(minimumOpSetVersion, LoaderSignature);
 
-                var terms = default(VBuffer<ReadOnlyMemory<char>>);
-                TermMap<ReadOnlyMemory<char>> map = (TermMap<ReadOnlyMemory<char>>)_termMap[iinfo].Map;
-                map.GetTerms(ref terms);
+                OnnxNode node;
+                long[] termIds;
                 string opType = "LabelEncoder";
-                var node = ctx.CreateNode(opType, srcVariableName, dstVariableName, ctx.GetNodeName(opType));
-                node.AddAttribute("classes_strings", terms.DenseValues());
-                node.AddAttribute("default_int64", -1);
-                //default_string needs to be an empty string but there is a BUG in Lotus that
-                //throws a validation error when default_string is empty. As a work around, set
-                //default_string to a space.
-                node.AddAttribute("default_string", " ");
+                OnnxNode castNode;
+                var labelEncoderOutput = ctx.AddIntermediateVariable(new VectorDataViewType(NumberDataViewType.Int64, _types[iinfo].GetValueCount()), "LabelEncoderOutput");
+
+                var type = info.TypeSrc.GetItemType();
+                if (type.Equals(TextDataViewType.Instance))
+                {
+                    node = ctx.CreateNode(opType, srcVariableName, labelEncoderOutput, ctx.GetNodeName(opType));
+                    var terms = GetTermsAndIds<ReadOnlyMemory<char>>(iinfo, out termIds);
+                    node.AddAttribute("keys_strings", terms);
+                }
+                else if (type.Equals(BooleanDataViewType.Instance))
+                {
+                    // LabelEncoder doesn't support boolean tensors, so values are cast to floats
+                    CastInputToFloat<Boolean>(ctx, out node, out termIds, srcVariableName, iinfo, opType, labelEncoderOutput);
+                }
+                else if (type.Equals(NumberDataViewType.Single))
+                {
+                    node = ctx.CreateNode(opType, srcVariableName, labelEncoderOutput, ctx.GetNodeName(opType));
+                    var terms = GetTermsAndIds<float>(iinfo, out termIds);
+                    node.AddAttribute("keys_floats", terms);
+                }
+                else if (type.Equals(NumberDataViewType.Double))
+                {
+                    // LabelEncoder doesn't support double tensors, so values are cast to floats
+                    CastInputToFloat<Double>(ctx, out node, out termIds, srcVariableName, iinfo, opType, labelEncoderOutput);
+                }
+                else if (type.Equals(NumberDataViewType.Int64))
+                {
+                    CastInputToString<Int64>(ctx, out node, out termIds ,srcVariableName, iinfo, opType, labelEncoderOutput );
+                }
+                else if (type.Equals(NumberDataViewType.Int32))
+                {
+                    CastInputToString<Int32>(ctx, out node, out termIds, srcVariableName, iinfo, opType, labelEncoderOutput);
+                }
+                else if (type.Equals(NumberDataViewType.Int16))
+                {
+                    CastInputToString<Int16>(ctx, out node, out termIds, srcVariableName, iinfo, opType, labelEncoderOutput);
+                }
+                else if (type.Equals(NumberDataViewType.UInt64))
+                {
+                    CastInputToString<UInt64>(ctx, out node, out termIds, srcVariableName, iinfo, opType, labelEncoderOutput);
+                }
+                else if (type.Equals(NumberDataViewType.UInt32))
+                {
+                    CastInputToString<UInt32>(ctx, out node, out termIds, srcVariableName, iinfo, opType, labelEncoderOutput);
+                }
+                else if (type.Equals(NumberDataViewType.UInt16))
+                {
+                    CastInputToString<UInt16>(ctx, out node, out termIds, srcVariableName, iinfo, opType, labelEncoderOutput);
+                }
+                else
+                {
+                    // LabelEncoder-2 in ORT v1 only supports the following mappings
+                    // int64-> float
+                    // int64-> string
+                    // float -> int64
+                    // float -> string
+                    // string -> int64
+                    // string -> float
+                    // In ML.NET the output of ValueToKeyMappingTransformer is always an integer type.
+                    // Therefore the only input types we can accept for Onnx conversion are strings and floats handled above.
+                    return false;
+                }
+
+                //Unknown keys should map to 0
+                node.AddAttribute("default_int64", 0);
+                node.AddAttribute("default_string", "0");
+                node.AddAttribute("default_float", 0f);
+                node.AddAttribute("values_int64s", termIds);
+
+                // Onnx outputs an Int64, but ML.NET outputs a keytype. So cast it here
+                InternalDataKind dataKind;
+                InternalDataKindExtensions.TryGetDataKind(_parent._unboundMaps[iinfo].OutputType.RawType, out dataKind);
+
+                opType = "Cast";
+                castNode = ctx.CreateNode(opType, labelEncoderOutput, dstVariableName, ctx.GetNodeName(opType), "");
+                castNode.AddAttribute("to", dataKind.ToType());
+
                 return true;
             }
 
@@ -839,7 +958,7 @@ namespace Microsoft.ML.Transforms
                 Contracts.AssertValue(srcToken);
                 //Contracts.Assert(CanSavePfa);
 
-                VectorType vectorType = info.TypeSrc as VectorType;
+                VectorDataViewType vectorType = info.TypeSrc as VectorDataViewType;
                 DataViewType itemType = vectorType?.ItemType ?? info.TypeSrc;
                 if (!(itemType is TextDataViewType))
                     return null;
